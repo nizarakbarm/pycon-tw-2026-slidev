@@ -1,0 +1,16 @@
+# macOS / editors
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Raw dumps excluded from this repository (see README, "What is not in this
+# repository"): they are gigabytes and regenerate from the runners.
+*.data
+*.T.txt
+stdout.txt

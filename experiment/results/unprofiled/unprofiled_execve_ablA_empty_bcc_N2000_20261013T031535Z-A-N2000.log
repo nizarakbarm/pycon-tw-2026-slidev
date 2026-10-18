@@ -1,0 +1,6 @@
+[THREAD] Main poll: ident=140099208349120 native=3366426
+[TIMING] BPF init CPU: 0.466s  wall: 0.466s
+[TIMING] Setup CPU: 0.001s  wall: 0.001s
+[TIMING] Poll loop CPU: 0.188s  wall: 3.661s
+[TIMING] Total CPU: 0.655s  wall: 4.129s
+[SUMMARY] Events in map: 2001

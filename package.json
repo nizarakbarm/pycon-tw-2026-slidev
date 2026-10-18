@@ -1,0 +1,23 @@
+{
+  "name": "pycon-tw-2026-bcc-vs-pythonbpf",
+  "type": "module",
+  "private": true,
+  "description": "Python eBPF: BCC C-String Runtime vs Python-BPF AST AOT — PyCon Taiwan 2026",
+  "scripts": {
+    "dev": "slidev slides.md --open",
+    "export": "slidev export slides.export.md",
+    "export:pdf": "slidev export slides.export.md --format pdf",
+    "export:html": "slidev build slides.export.md",
+    "notes": "slidev export slides.export.md --format md"
+  },
+  "dependencies": {
+    "@slidev/cli": "^53.0.0",
+    "@slidev/theme-default": "latest",
+    "slidev-addon-livecode": "^2.2.1",
+    "slidev-theme-nord": "0.0.6",
+    "vue": "^3.5.33"
+  },
+  "devDependencies": {
+    "playwright-chromium": "^1.64.0"
+  }
+}

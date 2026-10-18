@@ -1,0 +1,119 @@
+GhostLock (CVE-2026-43499) Python-BPF tracker — verification evidence
+Host: vmnono, kernel 6.12.0-160100.7-default x86_64, pythonbpf 0.2.0
+(/root/experiment/.venv), LLVM 21.1.8 (BPF target registered)
+Date: 2026-10-10
+
+FILES
+  ghostlock_futex_watch.py   tracker (kprobe/do_futex, printk -> trace_pipe)
+  ghostlock_enforce.py       tracker + userspace enforcer (SIGKILL on tag=3)
+  trigger_pi_futex.c         emits the GhostLock op set; `hold` keeps it alive
+
+1) PROBE-POINT FINDING (why do_futex, not __x64_sys_futex)
+   tracefs p:gl2 __x64_sys_futex di=%di si=%si dx=%dx ax=%ax
+      (__x64_sys_futex+0x4/0x1d0) di=0xff7d1a29c2567f48 si=0xca dx=0x0 ax=0xffffffffffffffff
+   -> at the sys_* wrapper the op is NOT in a register (rsi=0xca = syscall nr 202,
+      rdi = struct pt_regs *). Reaching the args needs a two-step deref PBPF
+      cannot emit.
+   tracefs p:gl3 do_futex di=%di si=%si dx=%dx
+      (do_futex+0x4/0x190) di=0x7fe827857000 si=0x6  dx=0x0
+      (do_futex+0x4/0x190) di=0x7fe827856000 si=0x86 dx=0x0
+      (do_futex+0x4/0x190) di=0x7fe827856000 si=0xb  dx=0x1
+      (do_futex+0x4/0x190) di=0x7fe827856000 si=0x8b dx=0x1
+      (do_futex+0x4/0x190) di=0x7fe827857000 si=0xc  dx=0x1
+      (do_futex+0x4/0x190) di=0x7fe827857000 si=0x8c dx=0x1
+      (do_futex+0x4/0x190) di=0x7fe827857000 si=0x7  dx=0x0
+      (do_futex+0x4/0x190) di=0x7fe827856000 si=0x87 dx=0x0
+   -> do_futex passes the op as a plain 2nd argument: op == rsi == ctx.si.
+
+2) TRACKER RUN (kprobe/do_futex, single printk, tag = 1/2/3)
+   attached kprobe/do_futex  (ATTACHED_AFTER=5s)
+   --- ./trigger_pi_futex ---
+   GHOSTLOCK op=6   tag=1 pid=3132122     FUTEX_LOCK_PI
+   GHOSTLOCK op=134 tag=1 pid=3132122     FUTEX_LOCK_PI|PRIVATE
+   GHOSTLOCK op=11  tag=2 pid=3132122     FUTEX_WAIT_REQUEUE_PI
+   GHOSTLOCK op=139 tag=2 pid=3132122     FUTEX_WAIT_REQUEUE_PI|PRIVATE
+   GHOSTLOCK op=12  tag=3 pid=3132122     FUTEX_CMP_REQUEUE_PI   <- exploit trigger
+   GHOSTLOCK op=140 tag=3 pid=3132122     FUTEX_CMP_REQUEUE_PI|PRIVATE
+   (UNLOCK_PI 7/135 correctly not reported)
+
+3) ENFORCER RUN (trace_pipe -> SIGKILL on tag=3)
+   ENFORCER signal op=6  tag=1 pid=3132382
+   ENFORCER signal op=11 tag=2 pid=3132382
+   ENFORCER signal op=12 tag=3 pid=3132382
+   ENFORCER KILLED pid=3132382
+   BLOCK_OK pid=3132382 killed by enforcer        (trigger started with `hold`)
+
+4) COMPILER/CODEGEN LIMITS HIT WHILE BUILDING THIS
+   * 8 ctx fields in one print  -> program loads+attaches, zero trace output
+   * 5 printk statements        -> program loads+attaches, zero trace output
+   * 1 printk, <=3 args         -> works (this tracker)
+   * struct-valued map, multi-section struct_pt_regs, buffer arrays, probe_read
+     chains: avoided by design (see the vault limitation notes)
+
+5) BCC ENFORCER RUN (in-kernel bpf_send_signal, no userspace kill)
+   ghostlock_enforce_bcc.py, BCC 0.36.0, same probe point (kprobe/do_futex).
+   Date: 2026-10-17
+
+   ENFORCER-READY (bcc, in-kernel signal)
+   GHOSTLOCK op=6   tag=1 pid=3185     FUTEX_LOCK_PI
+   GHOSTLOCK op=11  tag=2 pid=3185     FUTEX_WAIT_REQUEUE_PI
+   GHOSTLOCK op=12  tag=3 pid=3185     FUTEX_CMP_REQUEUE_PI  <- trigger
+   ENFORCER signalling SIGKILL pid=3185
+   trigger rc = -9 (SIGKILL)           killed in-kernel, no userspace os.kill
+
+   TAGS. tag 0 means "not part of the chain" and is never reported; the filter
+   is `if (tag == 0) return 0`, which is why UNLOCK_PI (7/135) does not appear.
+     tag 1 = FUTEX_LOCK_PI          (6/134)    PI chain built
+     tag 2 = FUTEX_WAIT_REQUEUE_PI  (11/139)   victim parks
+     tag 3 = FUTEX_CMP_REQUEUE_PI   (12/140)   exploit trigger; ONLY tag 3
+                                               raises the signal
+
+   THE KILL LEAVES NO LINE OF ITS OWN. The task is gone before anything could
+   print after it, so the program announces the decision BEFORE signalling and
+   the harness reports the child rc. The Python-BPF enforcer can log
+   ENFORCER KILLED after the fact, because userspace performs the kill there.
+
+   WHAT THIS PROVES, AND WHAT IT DOES NOT
+   * Proves: BCC reaches the same result with one fewer hop. bpf_send_signal
+     raises the signal from the BPF program, so no trace_pipe read and no
+     userspace kill loop is needed.
+   * Does NOT prove an in-kernel deny. bpf_send_signal delivers on return from
+     the probe, i.e. AFTER do_futex has run. Same ordering limit as the
+     Python-BPF version. Neither library can fail a syscall; seccomp can.
+
+   BUILD NOTES (each cost a round)
+   * #include <linux/futex.h>      -> mutex_init undeclared, clang cannot emit
+   * typed kprobe arg (int op)     -> BCC rewrites to ctx->di, fails with
+                                      "incomplete definition of struct pt_regs".
+                                      Fixed with a local pt_regs_x64 layout
+                                      and ARG2 = rsi.
+   * trace_pipe busy               -> a previous enforcer still held it.
+
+
+6) PERF BUFFER WAIT: WHAT THE RANK TOTALS HIDE
+   Tag 20261013T031535Z, 2M count arm, results/straceT. Both waits are 1 ms.
+
+   BCC poll        1,978,114 calls  1292.6 s
+     with data     1,876,744 (94.9%)  0.622 ms
+     timeout         101,370 ( 5.1%)  1.375 ms
+   PBPF epoll_wait 2,037,562 calls  1451.8 s
+     with data     1,927,731 (94.6%)  0.675 ms
+     timeout         109,831 ( 5.4%)  1.373 ms
+
+   * The timeout means match to three digits: same timer in both.
+   * 95 percent of wakes carry data, so the loop is NOT timer-driven. The
+     trigger bursts and then goes quiet.
+   * The 2.9 percent TOTAL gap is CALL COUNT, not a slower syscall. 3 percent
+     more calls, because call count is wall / timeout and this arm ran 5 s
+     longer (1768.6 against 1763.6). Per call the two are equivalent.
+   * epoll is NOT faster here, and the slide should not imply it. With 3 fds
+     it cannot be: poll is O(N) per wait, epoll_wait O(ready), and N is 3.
+     The benefit needs many fds.
+
+   SUMMING TRACE -T IS TRAP-LADEN. Field position shifts with the argument
+   text, so a fixed $9 silently reads the wrong field or nothing:
+     epoll_wait(9, [], 3, 1) = 0 <t>                          duration is $8
+     epoll_wait(9, [{events=EPOLLIN, data=0x...}], 3, 1) = 1 <t>   is $9
+   Scan from NF downward for the last <digits> token instead. Done that way the
+   total is 1451.765043 s, matching the rank file to the digit.
+

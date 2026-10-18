@@ -1,0 +1,135 @@
+/* Palette for this deck.
+ * Fixed: slide background = nord dark0 #2e3440, code surface = nord dark1 #3b4252.
+ * Rule: one hue, one meaning. Hierarchy comes from size and weight, not hue.
+ * Every colour below was picked against a WCAG 2.x contrast check on #2e3440
+ * and a CVD (protan/deutan/tritan) check on the BCC/Python-BPF pair. */
+
+:root {
+  --c-bg: #2e3440;
+  --c-surface: #3b4252;
+  --c-body: #eceff4;      /* 10.84 on bg */
+  --c-muted: #d8dee9;     /*  9.25 on bg */
+  --c-bcc: #f0883e;       /*  4.93 on bg, orange. AA for normal text. */
+  --c-pbpf: #81a1c1;      /*  4.64 on bg — never place on the surface */
+  --c-emph: #ebcb8b;      /*  8.00 on bg */
+  --c-caution: #e58f96;   /*  5.17 on bg */
+  --c-border: #434c5e;
+}
+
+/* Headings: one role. Size and weight already rank them, so no hue rotation. */
+.slidev-layout h1,
+.slidev-layout h2,
+.slidev-layout h3,
+.slidev-layout h4,
+.slidev-layout h5,
+.slidev-layout h6 {
+  color: var(--c-body);
+}
+
+/* Links: muted plus an underline. Replaces frost2 (4.64, at the floor). */
+.dark .slidev-layout a,
+.slidev-layout a {
+  color: var(--c-muted);
+  text-decoration: underline;
+}
+.dark .slidev-layout a:hover,
+.slidev-layout a:hover {
+  color: var(--c-body);
+}
+
+/* Emphasis roles. Italic shape carries the signal, so em needs no hue. */
+.slidev-layout em,
+.slidev-layout i {
+  color: var(--c-muted);
+}
+.slidev-layout strong,
+.slidev-layout b {
+  color: var(--c-emph);
+}
+.slidev-layout mark,
+.slidev-layout .highlight {
+  color: var(--c-emph);
+  background-color: rgba(235, 203, 139, 0.18);
+}
+
+/* Inline code: neutral text on the surface. Frees frost1 from two jobs. */
+.dark .slidev-layout code,
+.slidev-layout code {
+  color: var(--c-muted);
+  background-color: var(--c-surface);
+}
+.dark .slidev-layout pre,
+.slidev-layout pre,
+.slidev-layout .slidev-code {
+  background-color: var(--c-surface) !important;
+  color: var(--c-body);
+}
+
+/* Tables: no surface behind coloured headers (Python-BPF is 4.64 on bg,
+ * 3.74 on the surface), and zebra rows darken instead of lighten so light
+ * text keeps its contrast. */
+.slidev-layout table,
+.slidev-layout th,
+.slidev-layout td {
+  border-color: var(--c-border);
+}
+.slidev-layout thead {
+  background-color: transparent;
+  border-bottom: 2px solid var(--c-border);
+}
+.slidev-layout th {
+  color: var(--c-body);
+}
+.slidev-layout tbody tr:nth-child(even) {
+  background-color: rgba(0, 0, 0, 0.18);
+}
+.slidev-layout tbody tr:hover {
+  background-color: rgba(0, 0, 0, 0.28);
+}
+
+/* Semantic accents — the only place a hue carries meaning. */
+.slidev-layout .bcc {
+  color: var(--c-bcc);
+}
+.slidev-layout .pbpf {
+  color: var(--c-pbpf);
+}
+.slidev-layout .caution {
+  color: var(--c-caution);
+}
+
+.slidev-page-number {
+  color: var(--c-muted);
+}
+
+/* Mermaid renders inside an OPEN SHADOW ROOT (see @slidev/client/internals/
+ * ShadowRoot.vue), so no selector here can reach the <svg>. Slidev's own
+ * Mermaid.vue applies `scale` by setting the SVG's HEIGHT and REMOVING its
+ * width: the width then follows the viewBox ratio, which is what overflows.
+ * Constrain the host instead: cap its width and clip. */
+.slidev-layout .mermaid {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* Section divider: this deck uses it for a heading plus one subtitle line, so
+ * centre the whole slot block instead of letting the built-in layout top-align
+ * it. Note this deck is `theme: slidev-theme-nord`; themes/osas is a DIFFERENT
+ * deck's theme and its styles never load here. Rules for this deck belong in
+ * this file, which Slidev imports as the deck root's styles/index.css. */
+.slidev-layout.section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.slidev-layout.section h1 {
+  margin: 0;
+}
+
+.slidev-layout.section p {
+  margin: 0.6rem 0 0;
+  font-size: 1.05rem;
+}

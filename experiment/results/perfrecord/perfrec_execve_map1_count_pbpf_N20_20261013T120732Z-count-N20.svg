@@ -1,0 +1,3466 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="966" onload="init(evt)" viewBox="0 0 1200 966" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#e0e0ff" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="966.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >execve map1_count pbpf N=20</text>
+<text id="details" x="10.00" y="949" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="949" > </text>
+<g id="frames">
+<g >
+<title>handle_mm_fault (8,703,777 us, 1.23%)</title><rect x="578.0" y="565" width="14.5" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="581.00" y="575.5" ></text>
+</g>
+<g >
+<title>_dl_new_object (238,908 us, 0.03%)</title><rect x="148.8" y="741" width="0.4" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="151.76" y="751.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (8,703,777 us, 1.23%)</title><rect x="578.0" y="549" width="14.5" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="581.00" y="559.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (47,013,185 us, 6.63%)</title><rect x="241.3" y="389" width="78.3" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="244.34" y="399.5" >PyImport_..</text>
+</g>
+<g >
+<title>__d_lookup (267,680 us, 0.04%)</title><rect x="47.4" y="613" width="0.4" height="15.0" fill="rgb(116,116,224)" rx="2" ry="2" />
+<text  x="50.37" y="623.5" ></text>
+</g>
+<g >
+<title>napi_gro_receive (191,733 us, 0.03%)</title><rect x="188.8" y="645" width="0.3" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="191.80" y="655.5" ></text>
+</g>
+<g >
+<title>_io_open (15,368,260 us, 2.17%)</title><rect x="398.1" y="357" width="25.6" height="15.0" fill="rgb(119,119,239)" rx="2" ry="2" />
+<text  x="401.13" y="367.5" >_..</text>
+</g>
+<g >
+<title>folio_alloc_mpol_noprof (238,908 us, 0.03%)</title><rect x="148.8" y="613" width="0.4" height="15.0" fill="rgb(134,134,235)" rx="2" ry="2" />
+<text  x="151.76" y="623.5" ></text>
+</g>
+<g >
+<title>tupledealloc (5,013,056 us, 0.71%)</title><rect x="1002.1" y="693" width="8.3" height="15.0" fill="rgb(114,114,226)" rx="2" ry="2" />
+<text  x="1005.08" y="703.5" ></text>
+</g>
+<g >
+<title>void pybind11::detail::argument_loader&lt;BpfObject*&gt;::call_impl&lt;void, pybind11::cpp_function::cpp_function&lt;void, BpfObject, , pybind11::name, pybind11::is_method, pybind11::sibling&gt; (15,785,510 us, 2.23%)</title><rect x="975.8" y="613" width="26.3" height="15.0" fill="rgb(114,114,234)" rx="2" ry="2" />
+<text  x="978.81" y="623.5" >v..</text>
+</g>
+<g >
+<title>type_call (15,368,260 us, 2.17%)</title><rect x="398.1" y="293" width="25.6" height="15.0" fill="rgb(124,124,218)" rx="2" ry="2" />
+<text  x="401.13" y="303.5" >t..</text>
+</g>
+<g >
+<title>link_path_walk.part.0.constprop.0 (15,650,833 us, 2.21%)</title><rect x="267.6" y="165" width="26.1" height="15.0" fill="rgb(113,113,224)" rx="2" ry="2" />
+<text  x="270.65" y="175.5" >l..</text>
+</g>
+<g >
+<title>PyObject_GetOptionalAttr.localalias (15,600,770 us, 2.20%)</title><rect x="1010.4" y="693" width="26.0" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1013.42" y="703.5" >P..</text>
+</g>
+<g >
+<title>_PyObject_GC_Link (15,694,067 us, 2.21%)</title><rect x="722.7" y="661" width="26.1" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="725.65" y="671.5" >_..</text>
+</g>
+<g >
+<title>arena_map_is_used (14,781,865 us, 2.08%)</title><rect x="776.9" y="213" width="24.6" height="15.0" fill="rgb(115,115,237)" rx="2" ry="2" />
+<text  x="779.88" y="223.5" >a..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="437" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="447.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>pycore_init_types (8,703,777 us, 1.23%)</title><rect x="578.0" y="757" width="14.5" height="15.0" fill="rgb(133,133,229)" rx="2" ry="2" />
+<text  x="581.00" y="767.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="789" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="799.5" >_..</text>
+</g>
+<g >
+<title>__schedule (1,082,384 us, 0.15%)</title><rect x="1161.8" y="805" width="1.8" height="15.0" fill="rgb(114,114,225)" rx="2" ry="2" />
+<text  x="1164.78" y="815.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (16,886,401 us, 2.38%)</title><rect x="748.8" y="261" width="28.1" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="751.77" y="271.5" >d..</text>
+</g>
+<g >
+<title>object_vacall (18,155,844 us, 2.56%)</title><rect x="592.5" y="645" width="30.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="595.49" y="655.5" >ob..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="517" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="527.5" >_..</text>
+</g>
+<g >
+<title>object_vacall (76,654,918 us, 10.81%)</title><rect x="398.1" y="709" width="127.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="401.13" y="719.5" >object_vacall</text>
+</g>
+<g >
+<title>__x64_sys_epoll_wait (12,774,734 us, 1.80%)</title><rect x="900.3" y="501" width="21.3" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="903.33" y="511.5" >_..</text>
+</g>
+<g >
+<title>builtin_exec (62,836,908 us, 8.86%)</title><rect x="241.3" y="693" width="104.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="244.34" y="703.5" >builtin_exec</text>
+</g>
+<g >
+<title>portable_lseek (15,368,260 us, 2.17%)</title><rect x="398.1" y="197" width="25.6" height="15.0" fill="rgb(129,129,225)" rx="2" ry="2" />
+<text  x="401.13" y="207.5" >p..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="597" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="554.90" y="607.5" >P..</text>
+</g>
+<g >
+<title>object_vacall (61,781,626 us, 8.71%)</title><rect x="748.8" y="549" width="102.8" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="751.77" y="559.5" >object_vacall</text>
+</g>
+<g >
+<title>__handle_mm_fault (96,751 us, 0.01%)</title><rect x="149.2" y="741" width="0.1" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="152.15" y="751.5" ></text>
+</g>
+<g >
+<title>llc (44,763,744 us, 6.31%)</title><rect x="10.0" y="901" width="74.5" height="15.0" fill="rgb(108,108,216)" rx="2" ry="2" />
+<text  x="13.00" y="911.5" >llc</text>
+</g>
+<g >
+<title>bpf_object_prepare (15,785,510 us, 2.23%)</title><rect x="975.8" y="533" width="26.3" height="15.0" fill="rgb(115,115,237)" rx="2" ry="2" />
+<text  x="978.81" y="543.5" >b..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (96,751 us, 0.01%)</title><rect x="149.2" y="805" width="0.1" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="152.15" y="815.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="453" width="26.4" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="1166.58" y="463.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (62,836,908 us, 8.86%)</title><rect x="241.3" y="565" width="104.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="244.34" y="575.5" >builtin_exec</text>
+</g>
+<g >
+<title>_PyObject_GC_Link (15,763,764 us, 2.22%)</title><rect x="449.8" y="213" width="26.2" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="452.81" y="223.5" >_..</text>
+</g>
+<g >
+<title>exit_to_user_mode_loop (7,955,554 us, 1.12%)</title><rect x="921.6" y="501" width="13.2" height="15.0" fill="rgb(117,117,237)" rx="2" ry="2" />
+<text  x="924.59" y="511.5" ></text>
+</g>
+<g >
+<title>move_unreachable (15,426,873 us, 2.18%)</title><rect x="215.7" y="197" width="25.6" height="15.0" fill="rgb(111,111,230)" rx="2" ry="2" />
+<text  x="218.67" y="207.5" >m..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::initialize&lt;pybind11::cpp_function::initialize&lt;void, BpfObject, , pybind11::name, pybind11::is_method, pybind11::sibling&gt; (15,785,510 us, 2.23%)</title><rect x="975.8" y="645" width="26.3" height="15.0" fill="rgb(134,134,234)" rx="2" ry="2" />
+<text  x="978.81" y="655.5" >p..</text>
+</g>
+<g >
+<title>_PyObject_MakeTpCall.localalias (15,368,260 us, 2.17%)</title><rect x="398.1" y="309" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="319.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="693" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="703.5" >_..</text>
+</g>
+<g >
+<title>filemap_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="341" width="28.1" height="15.0" fill="rgb(127,127,230)" rx="2" ry="2" />
+<text  x="751.77" y="351.5" >f..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,398,073 us, 2.17%)</title><rect x="826.0" y="437" width="25.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="828.97" y="447.5" >c..</text>
+</g>
+<g >
+<title>PerfEventArray::poll (56,664,323 us, 7.99%)</title><rect x="881.5" y="581" width="94.3" height="15.0" fill="rgb(132,132,216)" rx="2" ry="2" />
+<text  x="884.50" y="591.5" >PerfEventAr..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (44,895,225 us, 6.33%)</title><rect x="776.9" y="469" width="74.7" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="779.88" y="479.5" >_PyEval_..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (369,368 us, 0.05%)</title><rect x="188.8" y="885" width="0.6" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="191.80" y="895.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="805" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="554.90" y="815.5" >P..</text>
+</g>
+<g >
+<title>do_anonymous_page (96,751 us, 0.01%)</title><rect x="149.2" y="725" width="0.1" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="152.15" y="735.5" ></text>
+</g>
+<g >
+<title>object_vacall (61,781,626 us, 8.71%)</title><rect x="748.8" y="677" width="102.8" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="751.77" y="687.5" >object_vacall</text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="341" width="26.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="351.5" >P..</text>
+</g>
+<g >
+<title>object_vacall (15,874,803 us, 2.24%)</title><rect x="1163.6" y="549" width="26.4" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="1166.58" y="559.5" >o..</text>
+</g>
+<g >
+<title>find_name_in_mro (15,774,847 us, 2.23%)</title><rect x="189.4" y="213" width="26.3" height="15.0" fill="rgb(126,126,237)" rx="2" ry="2" />
+<text  x="192.41" y="223.5" >f..</text>
+</g>
+<g >
+<title>page_to_skb (177,619 us, 0.03%)</title><rect x="189.1" y="629" width="0.3" height="15.0" fill="rgb(118,118,214)" rx="2" ry="2" />
+<text  x="192.12" y="639.5" ></text>
+</g>
+<g >
+<title>builtin_exec (15,684,884 us, 2.21%)</title><rect x="551.9" y="389" width="26.1" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="554.90" y="399.5" >b..</text>
+</g>
+<g >
+<title>builtin___build_class__ (15,774,847 us, 2.23%)</title><rect x="189.4" y="309" width="26.3" height="15.0" fill="rgb(106,106,221)" rx="2" ry="2" />
+<text  x="192.41" y="319.5" >b..</text>
+</g>
+<g >
+<title>object_vacall (31,363,771 us, 4.42%)</title><rect x="345.9" y="341" width="52.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="348.93" y="351.5" >objec..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (47,013,185 us, 6.63%)</title><rect x="241.3" y="341" width="78.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="351.5" >_PyEval_E..</text>
+</g>
+<g >
+<title>lookup_fast (15,558,322 us, 2.19%)</title><rect x="293.7" y="149" width="25.9" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="296.70" y="159.5" >l..</text>
+</g>
+<g >
+<title>pybind11::detail::type_caster_generic::load (11,129,164 us, 1.57%)</title><rect x="863.0" y="597" width="18.5" height="15.0" fill="rgb(134,134,231)" rx="2" ry="2" />
+<text  x="865.97" y="607.5" ></text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (21,029,491 us, 2.97%)</title><rect x="622.7" y="677" width="35.0" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="625.71" y="687.5" >cf..</text>
+</g>
+<g >
+<title>handle_mm_fault (29,839,460 us, 4.21%)</title><rect x="476.0" y="213" width="49.7" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="479.05" y="223.5" >handl..</text>
+</g>
+<g >
+<title>xfs_file_buffered_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="357" width="28.1" height="15.0" fill="rgb(130,130,230)" rx="2" ry="2" />
+<text  x="751.77" y="367.5" >x..</text>
+</g>
+<g >
+<title>_PyObject_VectorcallDictTstate (15,774,847 us, 2.23%)</title><rect x="189.4" y="293" width="26.3" height="15.0" fill="rgb(124,124,235)" rx="2" ry="2" />
+<text  x="192.41" y="303.5" >_..</text>
+</g>
+<g >
+<title>import_ensure_initialized (15,874,803 us, 2.24%)</title><rect x="1163.6" y="309" width="26.4" height="15.0" fill="rgb(113,113,241)" rx="2" ry="2" />
+<text  x="1166.58" y="319.5" >i..</text>
+</g>
+<g >
+<title>object_vacall (62,836,908 us, 8.86%)</title><rect x="241.3" y="485" width="104.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="244.34" y="495.5" >object_vacall</text>
+</g>
+<g >
+<title>read_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="437" width="26.3" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="322.59" y="447.5" >r..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,774,847 us, 2.23%)</title><rect x="189.4" y="485" width="26.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="495.5" >c..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="517" width="104.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="244.34" y="527.5" >PyImport_Imp..</text>
+</g>
+<g >
+<title>_PyRun_AnyFileObject (31,363,771 us, 4.42%)</title><rect x="345.9" y="869" width="52.2" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="348.93" y="879.5" >_PyRu..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (62,836,908 us, 8.86%)</title><rect x="241.3" y="709" width="104.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="244.34" y="719.5" >cfunction_ve..</text>
+</g>
+<g >
+<title>run_mod (15,763,764 us, 2.22%)</title><rect x="449.8" y="325" width="26.2" height="15.0" fill="rgb(120,120,243)" rx="2" ry="2" />
+<text  x="452.81" y="335.5" >r..</text>
+</g>
+<g >
+<title>_PyObject_VectorcallDictTstate (15,426,873 us, 2.18%)</title><rect x="215.7" y="389" width="25.6" height="15.0" fill="rgb(124,124,235)" rx="2" ry="2" />
+<text  x="218.67" y="399.5" >_..</text>
+</g>
+<g >
+<title>lookup_fast (267,680 us, 0.04%)</title><rect x="47.4" y="629" width="0.4" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="50.37" y="639.5" ></text>
+</g>
+<g >
+<title>PyCell_New.localalias (15,694,067 us, 2.21%)</title><rect x="722.7" y="709" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="725.65" y="719.5" >P..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (44,895,225 us, 6.33%)</title><rect x="776.9" y="517" width="74.7" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="779.88" y="527.5" >cfunctio..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="725" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="735.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>function_def_raw_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="341" width="26.2" height="15.0" fill="rgb(124,124,225)" rx="2" ry="2" />
+<text  x="528.71" y="351.5" >f..</text>
+</g>
+<g >
+<title>feat_supported (15,785,510 us, 2.23%)</title><rect x="975.8" y="485" width="26.3" height="15.0" fill="rgb(132,132,236)" rx="2" ry="2" />
+<text  x="978.81" y="495.5" >f..</text>
+</g>
+<g >
+<title>_Py_dict_lookup (15,823,723 us, 2.23%)</title><rect x="319.6" y="309" width="26.3" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="322.59" y="319.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="245" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="255.5" >_..</text>
+</g>
+<g >
+<title>_io__Buffered_read (15,804,030 us, 2.23%)</title><rect x="241.3" y="325" width="26.3" height="15.0" fill="rgb(119,119,230)" rx="2" ry="2" />
+<text  x="244.34" y="335.5" >_..</text>
+</g>
+<g >
+<title>lru_add (96,751 us, 0.01%)</title><rect x="149.2" y="677" width="0.1" height="15.0" fill="rgb(110,110,243)" rx="2" ry="2" />
+<text  x="152.15" y="687.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,684,884 us, 2.21%)</title><rect x="551.9" y="645" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="554.90" y="655.5" >o..</text>
+</g>
+<g >
+<title>dict_setdefault_ref_lock_held (15,823,723 us, 2.23%)</title><rect x="319.6" y="325" width="26.3" height="15.0" fill="rgb(129,129,230)" rx="2" ry="2" />
+<text  x="322.59" y="335.5" >d..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="709" width="35.0" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="625.71" y="719.5" >_P..</text>
+</g>
+<g >
+<title>__handle_mm_fault (238,908 us, 0.03%)</title><rect x="148.8" y="661" width="0.4" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="151.76" y="671.5" ></text>
+</g>
+<g >
+<title>schedule (1,082,384 us, 0.15%)</title><rect x="1161.8" y="821" width="1.8" height="15.0" fill="rgb(122,122,225)" rx="2" ry="2" />
+<text  x="1164.78" y="831.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,684,884 us, 2.21%)</title><rect x="551.9" y="565" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="554.90" y="575.5" >o..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="853" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="863.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="485" width="26.4" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="1166.58" y="495.5" >P..</text>
+</g>
+<g >
+<title>r_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="357" width="49.7" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="479.05" y="367.5" >r_obj..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="661" width="52.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="348.93" y="671.5" >PyEva..</text>
+</g>
+<g >
+<title>dict_traverse (12,550,303 us, 1.77%)</title><rect x="1061.2" y="757" width="20.9" height="15.0" fill="rgb(129,129,232)" rx="2" ry="2" />
+<text  x="1064.22" y="767.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (16,886,401 us, 2.38%)</title><rect x="748.8" y="149" width="28.1" height="15.0" fill="rgb(119,119,235)" rx="2" ry="2" />
+<text  x="751.77" y="159.5" >_..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="757" width="104.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="244.34" y="767.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,731,546 us, 2.22%)</title><rect x="525.7" y="533" width="26.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="528.71" y="543.5" >c..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="389" width="30.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="595.49" y="399.5" >Py..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (47,013,185 us, 6.63%)</title><rect x="241.3" y="373" width="78.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="244.34" y="383.5" >PyObject_..</text>
+</g>
+<g >
+<title>builtin_exec (31,363,771 us, 4.42%)</title><rect x="345.9" y="293" width="52.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="348.93" y="303.5" >built..</text>
+</g>
+<g >
+<title>gc_collect_main (15,426,873 us, 2.18%)</title><rect x="215.7" y="213" width="25.6" height="15.0" fill="rgb(124,124,236)" rx="2" ry="2" />
+<text  x="218.67" y="223.5" >g..</text>
+</g>
+<g >
+<title>xfs_file_read_iter (16,886,401 us, 2.38%)</title><rect x="748.8" y="373" width="28.1" height="15.0" fill="rgb(130,130,228)" rx="2" ry="2" />
+<text  x="751.77" y="383.5" >x..</text>
+</g>
+<g >
+<title>builtin_exec (15,874,803 us, 2.24%)</title><rect x="1163.6" y="629" width="26.4" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="1166.58" y="639.5" >b..</text>
+</g>
+<g >
+<title>unicode_hash (18,155,844 us, 2.56%)</title><rect x="592.5" y="341" width="30.2" height="15.0" fill="rgb(117,117,230)" rx="2" ry="2" />
+<text  x="595.49" y="351.5" >un..</text>
+</g>
+<g >
+<title>llvm::TargetLoweringObjectFileELF::Initialize (22,309,056 us, 3.15%)</title><rect x="10.0" y="821" width="37.1" height="15.0" fill="rgb(103,103,234)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" >llv..</text>
+</g>
+<g >
+<title>unicode_decode_utf8 (8,703,777 us, 1.23%)</title><rect x="578.0" y="677" width="14.5" height="15.0" fill="rgb(117,117,223)" rx="2" ry="2" />
+<text  x="581.00" y="687.5" ></text>
+</g>
+<g >
+<title>bump_rlimit_memlock (15,785,510 us, 2.23%)</title><rect x="975.8" y="501" width="26.3" height="15.0" fill="rgb(113,113,229)" rx="2" ry="2" />
+<text  x="978.81" y="511.5" >b..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="357" width="49.1" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="779.88" y="367.5" >PyEv..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="885" width="104.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="244.34" y="895.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,774,847 us, 2.23%)</title><rect x="189.4" y="613" width="26.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="623.5" >c..</text>
+</g>
+<g >
+<title>object_vacall (15,874,803 us, 2.24%)</title><rect x="1163.6" y="421" width="26.4" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="1166.58" y="431.5" >o..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="725" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="735.5" >_..</text>
+</g>
+<g >
+<title>_dl_catch_exception (238,908 us, 0.03%)</title><rect x="148.8" y="805" width="0.4" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="151.76" y="815.5" ></text>
+</g>
+<g >
+<title>get_page_from_freelist (8,703,777 us, 1.23%)</title><rect x="578.0" y="453" width="14.5" height="15.0" fill="rgb(124,124,220)" rx="2" ry="2" />
+<text  x="581.00" y="463.5" ></text>
+</g>
+<g >
+<title>_PyObject_Free.part.0.isra.0 (14,715,287 us, 2.08%)</title><rect x="801.5" y="245" width="24.5" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="804.48" y="255.5" >_..</text>
+</g>
+<g >
+<title>object_vacall (31,363,771 us, 4.42%)</title><rect x="345.9" y="597" width="52.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="348.93" y="607.5" >objec..</text>
+</g>
+<g >
+<title>read (16,886,401 us, 2.38%)</title><rect x="748.8" y="453" width="28.1" height="15.0" fill="rgb(128,128,230)" rx="2" ry="2" />
+<text  x="751.77" y="463.5" >r..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="629" width="52.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="348.93" y="639.5" >PyImp..</text>
+</g>
+<g >
+<title>arena_map_is_used (21,029,491 us, 2.97%)</title><rect x="622.7" y="517" width="35.0" height="15.0" fill="rgb(115,115,237)" rx="2" ry="2" />
+<text  x="625.71" y="527.5" >ar..</text>
+</g>
+<g >
+<title>builtin_exec (15,874,803 us, 2.24%)</title><rect x="1163.6" y="373" width="26.4" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="1166.58" y="383.5" >b..</text>
+</g>
+<g >
+<title>object_vacall (15,426,873 us, 2.18%)</title><rect x="215.7" y="597" width="25.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="218.67" y="607.5" >o..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="469" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="479.5" >_..</text>
+</g>
+<g >
+<title>get_page_from_freelist (16,886,401 us, 2.38%)</title><rect x="748.8" y="133" width="28.1" height="15.0" fill="rgb(124,124,220)" rx="2" ry="2" />
+<text  x="751.77" y="143.5" >g..</text>
+</g>
+<g >
+<title>list_pop (21,029,491 us, 2.97%)</title><rect x="622.7" y="549" width="35.0" height="15.0" fill="rgb(109,109,236)" rx="2" ry="2" />
+<text  x="625.71" y="559.5" >li..</text>
+</g>
+<g >
+<title>object_vacall (76,654,918 us, 10.81%)</title><rect x="398.1" y="837" width="127.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="401.13" y="847.5" >object_vacall</text>
+</g>
+<g >
+<title>do_user_addr_fault (29,839,460 us, 4.21%)</title><rect x="476.0" y="229" width="49.7" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="479.05" y="239.5" >do_us..</text>
+</g>
+<g >
+<title>object_vacall (18,155,844 us, 2.56%)</title><rect x="592.5" y="373" width="30.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="595.49" y="383.5" >ob..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="677" width="26.3" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="192.41" y="687.5" >P..</text>
+</g>
+<g >
+<title>object_vacall (62,836,908 us, 8.86%)</title><rect x="241.3" y="741" width="104.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="244.34" y="751.5" >object_vacall</text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (369,366 us, 0.05%)</title><rect x="188.8" y="757" width="0.6" height="15.0" fill="rgb(117,117,224)" rx="2" ry="2" />
+<text  x="191.80" y="767.5" ></text>
+</g>
+<g >
+<title>tp_new_wrapper (15,426,873 us, 2.18%)</title><rect x="215.7" y="325" width="25.6" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="218.67" y="335.5" >t..</text>
+</g>
+<g >
+<title>PyObject_CallFunction.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="725" width="30.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="595.49" y="735.5" >Py..</text>
+</g>
+<g >
+<title>expression_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="149" width="26.2" height="15.0" fill="rgb(121,121,225)" rx="2" ry="2" />
+<text  x="528.71" y="159.5" >e..</text>
+</g>
+<g >
+<title>exc_page_fault (29,839,460 us, 4.21%)</title><rect x="476.0" y="245" width="49.7" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="479.05" y="255.5" >exc_p..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="533" width="102.8" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="751.77" y="543.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>__netif_receive_skb_list_core (191,733 us, 0.03%)</title><rect x="188.8" y="613" width="0.3" height="15.0" fill="rgb(118,118,235)" rx="2" ry="2" />
+<text  x="191.80" y="623.5" ></text>
+</g>
+<g >
+<title>allocate_from_new_pool (8,703,777 us, 1.23%)</title><rect x="578.0" y="629" width="14.5" height="15.0" fill="rgb(113,113,226)" rx="2" ry="2" />
+<text  x="581.00" y="639.5" ></text>
+</g>
+<g >
+<title>_PyObject_MakeTpCall.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="277" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="287.5" >_..</text>
+</g>
+<g >
+<title>path_lookupat (31,209,155 us, 4.40%)</title><rect x="267.6" y="181" width="52.0" height="15.0" fill="rgb(117,117,219)" rx="2" ry="2" />
+<text  x="270.65" y="191.5" >path_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="581" width="30.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="595.49" y="591.5" >_P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="629" width="30.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="595.49" y="639.5" >_P..</text>
+</g>
+<g >
+<title>builtin_exec (31,363,771 us, 4.42%)</title><rect x="345.9" y="421" width="52.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="348.93" y="431.5" >built..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_NOARGS (16,886,401 us, 2.38%)</title><rect x="748.8" y="501" width="28.1" height="15.0" fill="rgb(109,109,225)" rx="2" ry="2" />
+<text  x="751.77" y="511.5" >c..</text>
+</g>
+<g >
+<title>bpf_token_capable (15,785,510 us, 2.23%)</title><rect x="975.8" y="325" width="26.3" height="15.0" fill="rgb(115,115,230)" rx="2" ry="2" />
+<text  x="978.81" y="335.5" >b..</text>
+</g>
+<g >
+<title>builtin_exec (15,731,546 us, 2.22%)</title><rect x="525.7" y="773" width="26.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="528.71" y="783.5" >b..</text>
+</g>
+<g >
+<title>PyObject_CallFunction.localalias (15,368,260 us, 2.17%)</title><rect x="398.1" y="405" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="415.5" >P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="837" width="26.4" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="1166.58" y="847.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="517" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="527.5" >_PyEv..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::initialize&lt;pybind11::cpp_function::initialize&lt;void, BpfObject, , pybind11::name, pybind11::is_method, pybind11::sibling&gt; (15,785,510 us, 2.23%)</title><rect x="975.8" y="661" width="26.3" height="15.0" fill="rgb(134,134,234)" rx="2" ry="2" />
+<text  x="978.81" y="671.5" >p..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="373" width="26.3" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="192.41" y="383.5" >P..</text>
+</g>
+<g >
+<title>vfs_statx (31,209,155 us, 4.40%)</title><rect x="267.6" y="213" width="52.0" height="15.0" fill="rgb(113,113,236)" rx="2" ry="2" />
+<text  x="270.65" y="223.5" >vfs_s..</text>
+</g>
+<g >
+<title>object_isinstance (15,600,770 us, 2.20%)</title><rect x="1010.4" y="709" width="26.0" height="15.0" fill="rgb(116,116,241)" rx="2" ry="2" />
+<text  x="1013.42" y="719.5" >o..</text>
+</g>
+<g >
+<title>builtin_exec (76,654,918 us, 10.81%)</title><rect x="398.1" y="661" width="127.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="401.13" y="671.5" >builtin_exec</text>
+</g>
+<g >
+<title>PyUnicode_InternFromString.localalias (8,703,777 us, 1.23%)</title><rect x="578.0" y="693" width="14.5" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="581.00" y="703.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="437" width="49.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="779.88" y="447.5" >PyOb..</text>
+</g>
+<g >
+<title>do_anonymous_page (29,839,460 us, 4.21%)</title><rect x="476.0" y="181" width="49.7" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="479.05" y="191.5" >do_an..</text>
+</g>
+<g >
+<title>__GI___open64_nocancel (267,680 us, 0.04%)</title><rect x="47.4" y="741" width="0.4" height="15.0" fill="rgb(111,111,224)" rx="2" ry="2" />
+<text  x="50.37" y="751.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,447,198 us, 4.44%)</title><rect x="423.7" y="373" width="52.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="426.71" y="383.5" >_PyEv..</text>
+</g>
+<g >
+<title>init_static_type (8,703,777 us, 1.23%)</title><rect x="578.0" y="741" width="14.5" height="15.0" fill="rgb(122,122,239)" rx="2" ry="2" />
+<text  x="581.00" y="751.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (16,886,401 us, 2.38%)</title><rect x="748.8" y="421" width="28.1" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="751.77" y="431.5" >d..</text>
+</g>
+<g >
+<title>_dl_map_object_from_fd (145,095 us, 0.02%)</title><rect x="47.1" y="757" width="0.3" height="15.0" fill="rgb(128,128,232)" rx="2" ry="2" />
+<text  x="50.13" y="767.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (350,742,858 us, 49.47%)</title><rect x="578.0" y="853" width="583.8" height="15.0" fill="rgb(120,120,236)" rx="2" ry="2" />
+<text  x="581.00" y="863.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="645" width="35.0" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="625.71" y="655.5" >Py..</text>
+</g>
+<g >
+<title>unicodekeys_lookup_unicode (15,823,723 us, 2.23%)</title><rect x="319.6" y="293" width="26.3" height="15.0" fill="rgb(117,117,239)" rx="2" ry="2" />
+<text  x="322.59" y="303.5" >u..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (31,209,155 us, 4.40%)</title><rect x="267.6" y="277" width="52.0" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="270.65" y="287.5" >entry..</text>
+</g>
+<g >
+<title>builtin_exec (31,447,198 us, 4.44%)</title><rect x="423.7" y="405" width="52.3" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="426.71" y="415.5" >built..</text>
+</g>
+<g >
+<title>_PyObject_Malloc (29,839,460 us, 4.21%)</title><rect x="476.0" y="277" width="49.7" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="479.05" y="287.5" >_PyOb..</text>
+</g>
+<g >
+<title>slash_no_default_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="229" width="26.2" height="15.0" fill="rgb(116,116,225)" rx="2" ry="2" />
+<text  x="528.71" y="239.5" >s..</text>
+</g>
+<g >
+<title>builtin_exec (15,684,884 us, 2.21%)</title><rect x="551.9" y="517" width="26.1" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="554.90" y="527.5" >b..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="373" width="26.1" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="554.90" y="383.5" >P..</text>
+</g>
+<g >
+<title>handle_mm_fault (96,751 us, 0.01%)</title><rect x="149.2" y="757" width="0.1" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="152.15" y="767.5" ></text>
+</g>
+<g >
+<title>object_vacall (31,363,771 us, 4.42%)</title><rect x="345.9" y="725" width="52.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="348.93" y="735.5" >objec..</text>
+</g>
+<g >
+<title>_PyObject_Call_Prepend (15,426,873 us, 2.18%)</title><rect x="215.7" y="405" width="25.6" height="15.0" fill="rgb(124,124,241)" rx="2" ry="2" />
+<text  x="218.67" y="415.5" >_..</text>
+</g>
+<g >
+<title>r_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="357" width="26.3" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="322.59" y="367.5" >r..</text>
+</g>
+<g >
+<title>__libc_start_call_main (22,309,056 us, 3.15%)</title><rect x="10.0" y="853" width="37.1" height="15.0" fill="rgb(120,120,236)" rx="2" ry="2" />
+<text  x="13.00" y="863.5" >__l..</text>
+</g>
+<g >
+<title>_PyRun_StringFlagsWithName.constprop.0 (15,731,546 us, 2.22%)</title><rect x="525.7" y="453" width="26.2" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="528.71" y="463.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="453" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="463.5" >_PyEv..</text>
+</g>
+<g >
+<title>function_def_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="357" width="26.2" height="15.0" fill="rgb(124,124,225)" rx="2" ry="2" />
+<text  x="528.71" y="367.5" >f..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="661" width="102.8" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="751.77" y="671.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>exc_page_fault (96,751 us, 0.01%)</title><rect x="149.2" y="789" width="0.1" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="152.15" y="799.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (2,920,151 us, 0.41%)</title><rect x="183.8" y="741" width="4.8" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="186.77" y="751.5" ></text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,874,803 us, 2.24%)</title><rect x="1163.6" y="773" width="26.4" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="1166.58" y="783.5" >c..</text>
+</g>
+<g >
+<title>type_call (15,426,873 us, 2.18%)</title><rect x="215.7" y="437" width="25.6" height="15.0" fill="rgb(124,124,218)" rx="2" ry="2" />
+<text  x="218.67" y="447.5" >t..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (44,895,225 us, 6.33%)</title><rect x="776.9" y="485" width="74.7" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="779.88" y="495.5" >PyEval_E..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (16,886,401 us, 2.38%)</title><rect x="748.8" y="293" width="28.1" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="751.77" y="303.5" >a..</text>
+</g>
+<g >
+<title>analyze_block (15,763,764 us, 2.22%)</title><rect x="449.8" y="261" width="26.2" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="452.81" y="271.5" >a..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="565" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="575.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="405" width="49.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="779.88" y="415.5" >_PyE..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (31,201,720 us, 4.40%)</title><rect x="189.4" y="869" width="51.9" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="879.5" >PyObj..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,426,873 us, 2.18%)</title><rect x="215.7" y="693" width="25.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="218.67" y="703.5" >c..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="485" width="127.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="401.13" y="495.5" >PyImport_ImportM..</text>
+</g>
+<g >
+<title>_dl_sysdep_start (24,056,349 us, 3.39%)</title><rect x="148.8" y="853" width="40.0" height="15.0" fill="rgb(128,128,227)" rx="2" ry="2" />
+<text  x="151.76" y="863.5" >_dl..</text>
+</g>
+<g >
+<title>_PyObject_Call (15,426,873 us, 2.18%)</title><rect x="215.7" y="357" width="25.6" height="15.0" fill="rgb(124,124,218)" rx="2" ry="2" />
+<text  x="218.67" y="367.5" >_..</text>
+</g>
+<g >
+<title>cfunction_call (83,578,997 us, 11.79%)</title><rect x="863.0" y="693" width="139.1" height="15.0" fill="rgb(109,109,218)" rx="2" ry="2" />
+<text  x="865.97" y="703.5" >cfunction_call</text>
+</g>
+<g >
+<title>builtin_exec (18,155,844 us, 2.56%)</title><rect x="592.5" y="613" width="30.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="595.49" y="623.5" >bu..</text>
+</g>
+<g >
+<title>type_new (15,774,847 us, 2.23%)</title><rect x="189.4" y="245" width="26.3" height="15.0" fill="rgb(124,124,223)" rx="2" ry="2" />
+<text  x="192.41" y="255.5" >t..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (227,519,431 us, 32.09%)</title><rect x="657.7" y="741" width="378.7" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="660.71" y="751.5" >PyEval_EvalCode.localalias</text>
+</g>
+<g >
+<title>gc_alloc.isra.0 (6,832,183 us, 0.96%)</title><rect x="851.6" y="661" width="11.4" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="854.60" y="671.5" ></text>
+</g>
+<g >
+<title>object_vacall (31,363,771 us, 4.42%)</title><rect x="345.9" y="469" width="52.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="348.93" y="479.5" >objec..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (15,785,510 us, 2.23%)</title><rect x="975.8" y="405" width="26.3" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="978.81" y="415.5" >e..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="741" width="127.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="401.13" y="751.5" >PyImport_ImportM..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="741" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="218.67" y="751.5" >P..</text>
+</g>
+<g >
+<title>native_flush_tlb_one_user (2,920,151 us, 0.41%)</title><rect x="183.8" y="661" width="4.8" height="15.0" fill="rgb(121,121,229)" rx="2" ry="2" />
+<text  x="186.77" y="671.5" ></text>
+</g>
+<g >
+<title>_dl_start (24,056,349 us, 3.39%)</title><rect x="148.8" y="869" width="40.0" height="15.0" fill="rgb(128,128,227)" rx="2" ry="2" />
+<text  x="151.76" y="879.5" >_dl..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="661" width="25.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="218.67" y="671.5" >P..</text>
+</g>
+<g >
+<title>_io__Buffered_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="517" width="28.1" height="15.0" fill="rgb(119,119,230)" rx="2" ry="2" />
+<text  x="751.77" y="527.5" >_..</text>
+</g>
+<g >
+<title>_PyObject_CallFunctionVa (18,155,844 us, 2.56%)</title><rect x="592.5" y="709" width="30.2" height="15.0" fill="rgb(124,124,219)" rx="2" ry="2" />
+<text  x="595.49" y="719.5" >_P..</text>
+</g>
+<g >
+<title>openaux (238,908 us, 0.03%)</title><rect x="148.8" y="789" width="0.4" height="15.0" fill="rgb(131,131,235)" rx="2" ry="2" />
+<text  x="151.76" y="799.5" ></text>
+</g>
+<g >
+<title>builtin_exec (15,874,803 us, 2.24%)</title><rect x="1163.6" y="757" width="26.4" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="1166.58" y="767.5" >b..</text>
+</g>
+<g >
+<title>__rmqueue_pcplist (8,703,777 us, 1.23%)</title><rect x="578.0" y="437" width="14.5" height="15.0" fill="rgb(115,115,220)" rx="2" ry="2" />
+<text  x="581.00" y="447.5" ></text>
+</g>
+<g >
+<title>ptep_clear_flush (2,920,151 us, 0.41%)</title><rect x="183.8" y="709" width="4.8" height="15.0" fill="rgb(123,123,224)" rx="2" ry="2" />
+<text  x="186.77" y="719.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="549" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="559.5" >_..</text>
+</g>
+<g >
+<title>_Py_Finalize.part.0.constprop.0 (75,334,315 us, 10.63%)</title><rect x="1036.4" y="821" width="125.4" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="1039.39" y="831.5" >_Py_Finalize.pa..</text>
+</g>
+<g >
+<title>receive_buf (177,619 us, 0.03%)</title><rect x="189.1" y="645" width="0.3" height="15.0" fill="rgb(126,126,231)" rx="2" ry="2" />
+<text  x="192.12" y="655.5" ></text>
+</g>
+<g >
+<title>update_refs (14,009,518 us, 1.98%)</title><rect x="1138.5" y="789" width="23.3" height="15.0" fill="rgb(119,119,227)" rx="2" ry="2" />
+<text  x="1141.46" y="799.5" >u..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::initialize&lt;pybind11::cpp_function::initialize&lt;int, PerfEventArray, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg&gt; (67,793,487 us, 9.56%)</title><rect x="863.0" y="661" width="112.8" height="15.0" fill="rgb(134,134,231)" rx="2" ry="2" />
+<text  x="865.97" y="671.5" >pybind11::cpp..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,874,803 us, 2.24%)</title><rect x="1163.6" y="389" width="26.4" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="1166.58" y="399.5" >c..</text>
+</g>
+<g >
+<title>__pthread_once_slow (20,748,165 us, 2.93%)</title><rect x="84.5" y="805" width="34.5" height="15.0" fill="rgb(116,116,226)" rx="2" ry="2" />
+<text  x="87.50" y="815.5" >__..</text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="597" width="35.0" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="625.71" y="607.5" >Py..</text>
+</g>
+<g >
+<title>gc_alloc.isra.0 (15,694,067 us, 2.21%)</title><rect x="722.7" y="677" width="26.1" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="725.65" y="687.5" >g..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="853" width="26.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="528.71" y="863.5" >P..</text>
+</g>
+<g >
+<title>intern_common (15,823,723 us, 2.23%)</title><rect x="319.6" y="341" width="26.3" height="15.0" fill="rgb(122,122,243)" rx="2" ry="2" />
+<text  x="322.59" y="351.5" >i..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="789" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="554.90" y="799.5" >P..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (15,368,260 us, 2.17%)</title><rect x="398.1" y="165" width="25.6" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="401.13" y="175.5" >e..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="629" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="639.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="357" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="367.5" >_..</text>
+</g>
+<g >
+<title>_PyThreadState_Attach (18,295,267 us, 2.58%)</title><rect x="945.4" y="549" width="30.4" height="15.0" fill="rgb(124,124,236)" rx="2" ry="2" />
+<text  x="948.36" y="559.5" >_P..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,363,771 us, 4.42%)</title><rect x="345.9" y="565" width="52.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="348.93" y="575.5" >cfunc..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="773" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="783.5" >_PyEv..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="709" width="102.8" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="751.77" y="719.5" >PyImport_Imp..</text>
+</g>
+<g >
+<title>builtin_exec (15,774,847 us, 2.23%)</title><rect x="189.4" y="597" width="26.3" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="192.41" y="607.5" >b..</text>
+</g>
+<g >
+<title>object_vacall (29,497,152 us, 4.16%)</title><rect x="776.9" y="421" width="49.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="779.88" y="431.5" >obje..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="549" width="26.3" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="192.41" y="559.5" >P..</text>
+</g>
+<g >
+<title>pycore_interp_init (8,703,777 us, 1.23%)</title><rect x="578.0" y="773" width="14.5" height="15.0" fill="rgb(133,133,224)" rx="2" ry="2" />
+<text  x="581.00" y="783.5" ></text>
+</g>
+<g >
+<title>_PyObject_Free.part.0.isra.0 (21,029,491 us, 2.97%)</title><rect x="622.7" y="533" width="35.0" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="625.71" y="543.5" >_P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="389" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="399.5" >_PyEv..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="757" width="52.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="348.93" y="767.5" >PyImp..</text>
+</g>
+<g >
+<title>compound_stmt_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="293" width="26.2" height="15.0" fill="rgb(119,119,225)" rx="2" ry="2" />
+<text  x="528.71" y="303.5" >c..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="677" width="104.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="244.34" y="687.5" >PyEval_EvalC..</text>
+</g>
+<g >
+<title>_PyObject_Free.part.0.isra.0 (15,684,884 us, 2.21%)</title><rect x="551.9" y="261" width="26.1" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="554.90" y="271.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="485" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="495.5" >_..</text>
+</g>
+<g >
+<title>python3 (601,173,806 us, 84.80%)</title><rect x="189.4" y="901" width="1000.6" height="15.0" fill="rgb(129,129,240)" rx="2" ry="2" />
+<text  x="192.41" y="911.5" >python3</text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="501" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="218.67" y="511.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (227,519,431 us, 32.09%)</title><rect x="657.7" y="725" width="378.7" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="660.71" y="735.5" >_PyEval_EvalFrameDefault.localalias</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="565" width="35.0" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="625.71" y="575.5" >_P..</text>
+</g>
+<g >
+<title>alloc_pages_mpol (16,886,401 us, 2.38%)</title><rect x="748.8" y="165" width="28.1" height="15.0" fill="rgb(113,113,225)" rx="2" ry="2" />
+<text  x="751.77" y="175.5" >a..</text>
+</g>
+<g >
+<title>config_get_codec_name (21,029,491 us, 2.97%)</title><rect x="622.7" y="757" width="35.0" height="15.0" fill="rgb(118,118,230)" rx="2" ry="2" />
+<text  x="625.71" y="767.5" >co..</text>
+</g>
+<g >
+<title>os_stat (31,209,155 us, 4.40%)</title><rect x="267.6" y="325" width="52.0" height="15.0" fill="rgb(122,122,216)" rx="2" ry="2" />
+<text  x="270.65" y="335.5" >os_stat</text>
+</g>
+<g >
+<title>PyType_GenericAlloc.localalias (15,763,764 us, 2.22%)</title><rect x="449.8" y="245" width="26.2" height="15.0" fill="rgb(140,140,217)" rx="2" ry="2" />
+<text  x="452.81" y="255.5" >P..</text>
+</g>
+<g >
+<title>net_rx_action (369,352 us, 0.05%)</title><rect x="188.8" y="693" width="0.6" height="15.0" fill="rgb(130,130,236)" rx="2" ry="2" />
+<text  x="191.80" y="703.5" ></text>
+</g>
+<g >
+<title>r_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="341" width="49.7" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="479.05" y="351.5" >r_obj..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,684,884 us, 2.21%)</title><rect x="551.9" y="533" width="26.1" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="554.90" y="543.5" >c..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="501" width="52.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="348.93" y="511.5" >PyImp..</text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (8,703,777 us, 1.23%)</title><rect x="578.0" y="469" width="14.5" height="15.0" fill="rgb(119,119,235)" rx="2" ry="2" />
+<text  x="581.00" y="479.5" ></text>
+</g>
+<g >
+<title>_PyObject_MakeTpCall.localalias (88,592,053 us, 12.50%)</title><rect x="863.0" y="709" width="147.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="865.97" y="719.5" >_PyObject_MakeTpCa..</text>
+</g>
+<g >
+<title>_start (44,618,649 us, 6.29%)</title><rect x="10.0" y="885" width="74.3" height="15.0" fill="rgb(116,116,227)" rx="2" ry="2" />
+<text  x="13.00" y="895.5" >_start</text>
+</g>
+<g >
+<title>finalize_interp_clear (14,916,913 us, 2.10%)</title><rect x="1036.4" y="805" width="24.8" height="15.0" fill="rgb(126,126,222)" rx="2" ry="2" />
+<text  x="1039.39" y="815.5" >f..</text>
+</g>
+<g >
+<title>object_vacall (15,874,803 us, 2.24%)</title><rect x="1163.6" y="677" width="26.4" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="1166.58" y="687.5" >o..</text>
+</g>
+<g >
+<title>__irq_exit_rcu (369,352 us, 0.05%)</title><rect x="188.8" y="725" width="0.6" height="15.0" fill="rgb(112,112,226)" rx="2" ry="2" />
+<text  x="191.80" y="735.5" ></text>
+</g>
+<g >
+<title>cfunction_call (15,426,873 us, 2.18%)</title><rect x="215.7" y="341" width="25.6" height="15.0" fill="rgb(109,109,218)" rx="2" ry="2" />
+<text  x="218.67" y="351.5" >c..</text>
+</g>
+<g >
+<title>ip_list_rcv (191,733 us, 0.03%)</title><rect x="188.8" y="597" width="0.3" height="15.0" fill="rgb(117,117,225)" rx="2" ry="2" />
+<text  x="191.80" y="607.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="709" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="719.5" >_PyEv..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="597" width="26.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="528.71" y="607.5" >P..</text>
+</g>
+<g >
+<title>list_dealloc (14,781,865 us, 2.08%)</title><rect x="776.9" y="245" width="24.6" height="15.0" fill="rgb(109,109,226)" rx="2" ry="2" />
+<text  x="779.88" y="255.5" >l..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="485" width="52.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="348.93" y="495.5" >PyObj..</text>
+</g>
+<g >
+<title>flush_tlb_mm_range (2,920,151 us, 0.41%)</title><rect x="183.8" y="693" width="4.8" height="15.0" fill="rgb(116,116,236)" rx="2" ry="2" />
+<text  x="186.77" y="703.5" ></text>
+</g>
+<g >
+<title>llvm::InitLLVM::~InitLLVM (17,855,857 us, 2.52%)</title><rect x="119.0" y="821" width="29.8" height="15.0" fill="rgb(103,103,217)" rx="2" ry="2" />
+<text  x="122.04" y="831.5" >ll..</text>
+</g>
+<g >
+<title>pyinit_main (39,185,335 us, 5.53%)</title><rect x="592.5" y="789" width="65.2" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="595.49" y="799.5" >pyinit_..</text>
+</g>
+<g >
+<title>_PyPegen_run_parser (15,731,546 us, 2.22%)</title><rect x="525.7" y="421" width="26.2" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="528.71" y="431.5" >_..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="341" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="554.90" y="351.5" >P..</text>
+</g>
+<g >
+<title>psi_group_change (1,082,384 us, 0.15%)</title><rect x="1161.8" y="773" width="1.8" height="15.0" fill="rgb(121,121,236)" rx="2" ry="2" />
+<text  x="1164.78" y="783.5" ></text>
+</g>
+<g >
+<title>std::enable_if&lt;std::is_void&lt;void&gt;::value, pybind11::detail::void_type&gt;::type pybind11::detail::argument_loader&lt;BpfObject*&gt;::call&lt;void, pybind11::detail::void_type, pybind11::cpp_function::cpp_function&lt;void, BpfObject, , pybind11::name, pybind11::is_method, pybind11::sibling&gt; (15,785,510 us, 2.23%)</title><rect x="975.8" y="629" width="26.3" height="15.0" fill="rgb(118,118,234)" rx="2" ry="2" />
+<text  x="978.81" y="639.5" >s..</text>
+</g>
+<g >
+<title>run_eval_code_obj (18,155,844 us, 2.56%)</title><rect x="592.5" y="485" width="30.2" height="15.0" fill="rgb(120,120,219)" rx="2" ry="2" />
+<text  x="595.49" y="495.5" >ru..</text>
+</g>
+<g >
+<title>__tls_get_addr (15,763,764 us, 2.22%)</title><rect x="449.8" y="197" width="26.2" height="15.0" fill="rgb(113,113,233)" rx="2" ry="2" />
+<text  x="452.81" y="207.5" >_..</text>
+</g>
+<g >
+<title>posix_do_stat.isra.0 (31,209,155 us, 4.40%)</title><rect x="267.6" y="309" width="52.0" height="15.0" fill="rgb(128,128,226)" rx="2" ry="2" />
+<text  x="270.65" y="319.5" >posix..</text>
+</g>
+<g >
+<title>builtin_exec (15,684,884 us, 2.21%)</title><rect x="551.9" y="853" width="26.1" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="554.90" y="863.5" >b..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="645" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="655.5" >_PyEv..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (108,071,348 us, 15.24%)</title><rect x="398.1" y="885" width="179.9" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="895.5" >_PyEval_EvalFrameDefaul..</text>
+</g>
+<g >
+<title>object_vacall (29,497,152 us, 4.16%)</title><rect x="776.9" y="293" width="49.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="779.88" y="303.5" >obje..</text>
+</g>
+<g >
+<title>_dl_sysdep_start (22,309,593 us, 3.15%)</title><rect x="47.1" y="853" width="37.2" height="15.0" fill="rgb(128,128,227)" rx="2" ry="2" />
+<text  x="50.13" y="863.5" >_dl..</text>
+</g>
+<g >
+<title>path_openat (267,680 us, 0.04%)</title><rect x="47.4" y="645" width="0.4" height="15.0" fill="rgb(117,117,221)" rx="2" ry="2" />
+<text  x="50.37" y="655.5" ></text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="405" width="52.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="348.93" y="415.5" >PyEva..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,684,884 us, 2.21%)</title><rect x="551.9" y="741" width="26.1" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="554.90" y="751.5" >c..</text>
+</g>
+<g >
+<title>dict_traverse (9,109,831 us, 1.28%)</title><rect x="1100.2" y="789" width="15.2" height="15.0" fill="rgb(129,129,232)" rx="2" ry="2" />
+<text  x="1103.24" y="799.5" ></text>
+</g>
+<g >
+<title>builtin_exec (76,654,918 us, 10.81%)</title><rect x="398.1" y="789" width="127.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="401.13" y="799.5" >builtin_exec</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (47,013,185 us, 6.63%)</title><rect x="241.3" y="453" width="78.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="244.34" y="463.5" >cfunction..</text>
+</g>
+<g >
+<title>do_user_addr_fault (238,908 us, 0.03%)</title><rect x="148.8" y="693" width="0.4" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="151.76" y="703.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (96,751 us, 0.01%)</title><rect x="188.6" y="773" width="0.2" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="191.63" y="783.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="869" width="127.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="401.13" y="879.5" >PyImport_ImportM..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="773" width="104.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="244.34" y="783.5" >PyImport_Imp..</text>
+</g>
+<g >
+<title>__sys_bpf (15,785,510 us, 2.23%)</title><rect x="975.8" y="357" width="26.3" height="15.0" fill="rgb(114,114,237)" rx="2" ry="2" />
+<text  x="978.81" y="367.5" >_..</text>
+</g>
+<g >
+<title>handle_mm_fault (238,908 us, 0.03%)</title><rect x="148.8" y="677" width="0.4" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="151.76" y="687.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (8,703,777 us, 1.23%)</title><rect x="578.0" y="613" width="14.5" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="581.00" y="623.5" ></text>
+</g>
+<g >
+<title>type_call (15,774,847 us, 2.23%)</title><rect x="189.4" y="261" width="26.3" height="15.0" fill="rgb(124,124,218)" rx="2" ry="2" />
+<text  x="192.41" y="271.5" >t..</text>
+</g>
+<g >
+<title>PyObject_GetOptionalAttr.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="277" width="26.4" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1166.58" y="287.5" >P..</text>
+</g>
+<g >
+<title>move_unreachable (12,550,303 us, 1.77%)</title><rect x="1061.2" y="773" width="20.9" height="15.0" fill="rgb(111,111,230)" rx="2" ry="2" />
+<text  x="1064.22" y="783.5" ></text>
+</g>
+<g >
+<title>object_vacall (76,654,918 us, 10.81%)</title><rect x="398.1" y="453" width="127.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="401.13" y="463.5" >object_vacall</text>
+</g>
+<g >
+<title>method_vectorcall (15,426,873 us, 2.18%)</title><rect x="215.7" y="261" width="25.6" height="15.0" fill="rgb(111,111,218)" rx="2" ry="2" />
+<text  x="218.67" y="271.5" >m..</text>
+</g>
+<g >
+<title>exc_page_fault (16,886,401 us, 2.38%)</title><rect x="748.8" y="277" width="28.1" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="751.77" y="287.5" >e..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (18,155,844 us, 2.56%)</title><rect x="592.5" y="549" width="30.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="595.49" y="559.5" >cf..</text>
+</g>
+<g >
+<title>Py_RunMain.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="885" width="52.2" height="15.0" fill="rgb(130,130,217)" rx="2" ry="2" />
+<text  x="348.93" y="895.5" >Py_Ru..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="773" width="127.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="401.13" y="783.5" >PyEval_EvalCode...</text>
+</g>
+<g >
+<title>netif_receive_skb_list_internal (191,733 us, 0.03%)</title><rect x="188.8" y="629" width="0.3" height="15.0" fill="rgb(130,130,217)" rx="2" ry="2" />
+<text  x="191.80" y="639.5" ></text>
+</g>
+<g >
+<title>epoll_wait (38,369,056 us, 5.41%)</title><rect x="881.5" y="549" width="63.9" height="15.0" fill="rgb(132,132,225)" rx="2" ry="2" />
+<text  x="884.50" y="559.5" >epoll_w..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="757" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="767.5" >_..</text>
+</g>
+<g >
+<title>_io_FileIO_readall_impl (15,804,030 us, 2.23%)</title><rect x="241.3" y="293" width="26.3" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="244.34" y="303.5" >_..</text>
+</g>
+<g >
+<title>r_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="421" width="26.3" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="322.59" y="431.5" >r..</text>
+</g>
+<g >
+<title>_start (351,825,242 us, 49.63%)</title><rect x="578.0" y="885" width="585.6" height="15.0" fill="rgb(116,116,227)" rx="2" ry="2" />
+<text  x="581.00" y="895.5" >_start</text>
+</g>
+<g >
+<title>_PyObject_GenericGetAttrWithDict.localalias (15,600,770 us, 2.20%)</title><rect x="1010.4" y="677" width="26.0" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1013.42" y="687.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="613" width="102.8" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="751.77" y="623.5" >PyEval_EvalC..</text>
+</g>
+<g >
+<title>psi_task_switch (1,082,384 us, 0.15%)</title><rect x="1161.8" y="789" width="1.8" height="15.0" fill="rgb(121,121,231)" rx="2" ry="2" />
+<text  x="1164.78" y="799.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,684,884 us, 2.21%)</title><rect x="551.9" y="773" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="554.90" y="783.5" >o..</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (38,604,022 us, 5.45%)</title><rect x="84.5" y="869" width="64.3" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="87.50" y="879.5" >__libc_..</text>
+</g>
+<g >
+<title>lru_add (15,858,868 us, 2.24%)</title><rect x="499.3" y="133" width="26.4" height="15.0" fill="rgb(110,110,243)" rx="2" ry="2" />
+<text  x="502.32" y="143.5" >l..</text>
+</g>
+<g >
+<title>__folio_batch_add_and_move (96,751 us, 0.01%)</title><rect x="149.2" y="709" width="0.1" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="152.15" y="719.5" ></text>
+</g>
+<g >
+<title>pyinit_core.constprop.0 (8,703,777 us, 1.23%)</title><rect x="578.0" y="789" width="14.5" height="15.0" fill="rgb(128,128,224)" rx="2" ry="2" />
+<text  x="581.00" y="799.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="501" width="104.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="244.34" y="511.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="325" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="554.90" y="335.5" >P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="405" width="30.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="595.49" y="415.5" >Py..</text>
+</g>
+<g >
+<title>load_elf_binary (369,368 us, 0.05%)</title><rect x="188.8" y="805" width="0.6" height="15.0" fill="rgb(121,121,237)" rx="2" ry="2" />
+<text  x="191.80" y="815.5" ></text>
+</g>
+<g >
+<title>flush_tlb_func (2,920,151 us, 0.41%)</title><rect x="183.8" y="677" width="4.8" height="15.0" fill="rgb(116,116,220)" rx="2" ry="2" />
+<text  x="186.77" y="687.5" ></text>
+</g>
+<g >
+<title>inversion_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="101" width="26.2" height="15.0" fill="rgb(121,121,225)" rx="2" ry="2" />
+<text  x="528.71" y="111.5" >i..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="853" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="863.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,447,198 us, 4.44%)</title><rect x="423.7" y="421" width="52.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="426.71" y="431.5" >cfunc..</text>
+</g>
+<g >
+<title>builtin_exec (15,774,847 us, 2.23%)</title><rect x="189.4" y="389" width="26.3" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="192.41" y="399.5" >b..</text>
+</g>
+<g >
+<title>handle_mm_fault (2,920,151 us, 0.41%)</title><rect x="183.8" y="757" width="4.8" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="186.77" y="767.5" ></text>
+</g>
+<g >
+<title>PyObject_CallFunctionObjArgs.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="293" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="218.67" y="303.5" >P..</text>
+</g>
+<g >
+<title>_dl_start (22,309,593 us, 3.15%)</title><rect x="47.1" y="869" width="37.2" height="15.0" fill="rgb(128,128,227)" rx="2" ry="2" />
+<text  x="50.13" y="879.5" >_dl..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (38,122,810 us, 5.38%)</title><rect x="881.9" y="533" width="63.5" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="884.91" y="543.5" >entry_..</text>
+</g>
+<g >
+<title>pyrun_file (31,363,771 us, 4.42%)</title><rect x="345.9" y="837" width="52.2" height="15.0" fill="rgb(130,130,225)" rx="2" ry="2" />
+<text  x="348.93" y="847.5" >pyrun..</text>
+</g>
+<g >
+<title>PyFunction_NewWithQualName.localalias (15,398,073 us, 2.17%)</title><rect x="826.0" y="389" width="25.6" height="15.0" fill="rgb(131,131,217)" rx="2" ry="2" />
+<text  x="828.97" y="399.5" >P..</text>
+</g>
+<g >
+<title>dl_main (24,056,349 us, 3.39%)</title><rect x="148.8" y="837" width="40.0" height="15.0" fill="rgb(118,118,236)" rx="2" ry="2" />
+<text  x="151.76" y="847.5" >dl_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="469" width="30.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="595.49" y="479.5" >Py..</text>
+</g>
+<g >
+<title>exit_to_user_mode_loop (1,082,384 us, 0.15%)</title><rect x="1161.8" y="837" width="1.8" height="15.0" fill="rgb(117,117,237)" rx="2" ry="2" />
+<text  x="1164.78" y="847.5" ></text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (15,398,073 us, 2.17%)</title><rect x="826.0" y="453" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="828.97" y="463.5" >P..</text>
+</g>
+<g >
+<title>PyMethod_New.localalias (6,832,183 us, 0.96%)</title><rect x="851.6" y="693" width="11.4" height="15.0" fill="rgb(135,135,217)" rx="2" ry="2" />
+<text  x="854.60" y="703.5" ></text>
+</g>
+<g >
+<title>probe_memcg_account (15,785,510 us, 2.23%)</title><rect x="975.8" y="469" width="26.3" height="15.0" fill="rgb(128,128,226)" rx="2" ry="2" />
+<text  x="978.81" y="479.5" >p..</text>
+</g>
+<g >
+<title>builtin_eval (15,763,764 us, 2.22%)</title><rect x="449.8" y="357" width="26.2" height="15.0" fill="rgb(106,106,211)" rx="2" ry="2" />
+<text  x="452.81" y="367.5" >b..</text>
+</g>
+<g >
+<title>marshal_loads (14,781,865 us, 2.08%)</title><rect x="776.9" y="261" width="24.6" height="15.0" fill="rgb(104,104,233)" rx="2" ry="2" />
+<text  x="779.88" y="271.5" >m..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="661" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="671.5" >_..</text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (16,886,401 us, 2.38%)</title><rect x="748.8" y="197" width="28.1" height="15.0" fill="rgb(109,109,235)" rx="2" ry="2" />
+<text  x="751.77" y="207.5" >v..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (76,654,918 us, 10.81%)</title><rect x="398.1" y="805" width="127.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="401.13" y="815.5" >cfunction_vector..</text>
+</g>
+<g >
+<title>read_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="405" width="49.7" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="479.05" y="415.5" >read_..</text>
+</g>
+<g >
+<title>params_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="245" width="26.2" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="528.71" y="255.5" >p..</text>
+</g>
+<g >
+<title>PyUnicode_New.part.0 (29,839,460 us, 4.21%)</title><rect x="476.0" y="293" width="49.7" height="15.0" fill="rgb(139,139,221)" rx="2" ry="2" />
+<text  x="479.05" y="303.5" >PyUni..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,201,720 us, 4.40%)</title><rect x="189.4" y="821" width="51.9" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="831.5" >cfunc..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::cpp_function&lt;void, BpfObject, , pybind11::name, pybind11::is_method, pybind11::sibling&gt; (15,785,510 us, 2.23%)</title><rect x="975.8" y="597" width="26.3" height="15.0" fill="rgb(134,134,234)" rx="2" ry="2" />
+<text  x="978.81" y="607.5" >p..</text>
+</g>
+<g >
+<title>int pybind11::detail::argument_loader&lt;PerfEventArray*, int&gt;::call_impl&lt;int, pybind11::cpp_function::cpp_function&lt;int, PerfEventArray, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg&gt; (56,664,323 us, 7.99%)</title><rect x="881.5" y="613" width="94.3" height="15.0" fill="rgb(122,122,231)" rx="2" ry="2" />
+<text  x="884.50" y="623.5" >int pybind1..</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (22,309,056 us, 3.15%)</title><rect x="10.0" y="869" width="37.1" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="13.00" y="879.5" >__l..</text>
+</g>
+<g >
+<title>update_one_slot (15,774,847 us, 2.23%)</title><rect x="189.4" y="229" width="26.3" height="15.0" fill="rgb(119,119,232)" rx="2" ry="2" />
+<text  x="192.41" y="239.5" >u..</text>
+</g>
+<g >
+<title>run_eval_code_obj (227,519,431 us, 32.09%)</title><rect x="657.7" y="757" width="378.7" height="15.0" fill="rgb(120,120,219)" rx="2" ry="2" />
+<text  x="660.71" y="767.5" >run_eval_code_obj</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="709" width="26.3" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="192.41" y="719.5" >P..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="357" width="52.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="348.93" y="367.5" >PyObj..</text>
+</g>
+<g >
+<title>object_vacall (31,201,720 us, 4.40%)</title><rect x="189.4" y="853" width="51.9" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="192.41" y="863.5" >objec..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="581" width="26.4" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="1166.58" y="591.5" >P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="805" width="26.3" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="192.41" y="815.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="741" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="751.5" >_..</text>
+</g>
+<g >
+<title>__do_sys_newfstatat (31,209,155 us, 4.40%)</title><rect x="267.6" y="245" width="52.0" height="15.0" fill="rgb(116,116,216)" rx="2" ry="2" />
+<text  x="270.65" y="255.5" >__do_..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (267,680 us, 0.04%)</title><rect x="47.4" y="725" width="0.4" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="50.37" y="735.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (238,908 us, 0.03%)</title><rect x="148.8" y="581" width="0.4" height="15.0" fill="rgb(119,119,235)" rx="2" ry="2" />
+<text  x="151.76" y="591.5" ></text>
+</g>
+<g >
+<title>__tls_get_addr@plt (15,694,067 us, 2.21%)</title><rect x="722.7" y="645" width="26.1" height="15.0" fill="rgb(113,113,219)" rx="2" ry="2" />
+<text  x="725.65" y="655.5" >_..</text>
+</g>
+<g >
+<title>object_vacall (47,013,185 us, 6.63%)</title><rect x="241.3" y="357" width="78.3" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="244.34" y="367.5" >object_va..</text>
+</g>
+<g >
+<title>_loop1_42_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="213" width="26.2" height="15.0" fill="rgb(115,115,225)" rx="2" ry="2" />
+<text  x="528.71" y="223.5" >_..</text>
+</g>
+<g >
+<title>walk_component (15,558,322 us, 2.19%)</title><rect x="293.7" y="165" width="25.9" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="296.70" y="175.5" >w..</text>
+</g>
+<g >
+<title>_PyObject_Malloc (8,703,777 us, 1.23%)</title><rect x="578.0" y="645" width="14.5" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="581.00" y="655.5" ></text>
+</g>
+<g >
+<title>_buffered_init (15,368,260 us, 2.17%)</title><rect x="398.1" y="261" width="25.6" height="15.0" fill="rgb(108,108,224)" rx="2" ry="2" />
+<text  x="401.13" y="271.5" >_..</text>
+</g>
+<g >
+<title>bool pybind11::detail::type_caster_generic::load_impl&lt;pybind11::detail::type_caster_generic&gt; (11,129,164 us, 1.57%)</title><rect x="863.0" y="581" width="18.5" height="15.0" fill="rgb(119,119,234)" rx="2" ry="2" />
+<text  x="865.97" y="591.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModule.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="757" width="30.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="595.49" y="767.5" >Py..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="581" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="554.90" y="591.5" >P..</text>
+</g>
+<g >
+<title>object_vacall (15,731,546 us, 2.22%)</title><rect x="525.7" y="565" width="26.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="528.71" y="575.5" >o..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="373" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="383.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="533" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="543.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,774,847 us, 2.23%)</title><rect x="189.4" y="405" width="26.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="415.5" >c..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="837" width="26.1" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="554.90" y="847.5" >P..</text>
+</g>
+<g >
+<title>type_new (15,426,873 us, 2.18%)</title><rect x="215.7" y="309" width="25.6" height="15.0" fill="rgb(124,124,223)" rx="2" ry="2" />
+<text  x="218.67" y="319.5" >t..</text>
+</g>
+<g >
+<title>do_syscall_64 (15,785,510 us, 2.23%)</title><rect x="975.8" y="389" width="26.3" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="978.81" y="399.5" >d..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,363,771 us, 4.42%)</title><rect x="345.9" y="693" width="52.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="348.93" y="703.5" >cfunc..</text>
+</g>
+<g >
+<title>__libc_start_call_main (38,604,022 us, 5.45%)</title><rect x="84.5" y="853" width="64.3" height="15.0" fill="rgb(120,120,236)" rx="2" ry="2" />
+<text  x="87.50" y="863.5" >__libc_..</text>
+</g>
+<g >
+<title>copy_page_to_iter (16,886,401 us, 2.38%)</title><rect x="748.8" y="325" width="28.1" height="15.0" fill="rgb(116,116,228)" rx="2" ry="2" />
+<text  x="751.77" y="335.5" >c..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (238,908 us, 0.03%)</title><rect x="148.8" y="725" width="0.4" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="151.76" y="735.5" ></text>
+</g>
+<g >
+<title>_PyParser_ASTFromString (15,731,546 us, 2.22%)</title><rect x="525.7" y="437" width="26.2" height="15.0" fill="rgb(124,124,232)" rx="2" ry="2" />
+<text  x="528.71" y="447.5" >_..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (2,920,151 us, 0.41%)</title><rect x="183.8" y="805" width="4.8" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="186.77" y="815.5" ></text>
+</g>
+<g >
+<title>builtin_exec (76,654,918 us, 10.81%)</title><rect x="398.1" y="533" width="127.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="401.13" y="543.5" >builtin_exec</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="469" width="127.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="479.5" >PyObject_CallMet..</text>
+</g>
+<g >
+<title>builtin_exec (29,497,152 us, 4.16%)</title><rect x="776.9" y="373" width="49.1" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="779.88" y="383.5" >buil..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="661" width="26.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="671.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (15,731,546 us, 2.22%)</title><rect x="525.7" y="645" width="26.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="528.71" y="655.5" >b..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="821" width="26.4" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1166.58" y="831.5" >P..</text>
+</g>
+<g >
+<title>_dl_map_object (238,908 us, 0.03%)</title><rect x="148.8" y="773" width="0.4" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="151.76" y="783.5" ></text>
+</g>
+<g >
+<title>run_mod (227,519,431 us, 32.09%)</title><rect x="657.7" y="773" width="378.7" height="15.0" fill="rgb(120,120,243)" rx="2" ry="2" />
+<text  x="660.71" y="783.5" >run_mod</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (16,886,401 us, 2.38%)</title><rect x="748.8" y="437" width="28.1" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="751.77" y="447.5" >e..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (29,839,460 us, 4.21%)</title><rect x="476.0" y="261" width="49.7" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="479.05" y="271.5" >asm_e..</text>
+</g>
+<g >
+<title>llseek@GLIBC_2.2.5 (15,368,260 us, 2.17%)</title><rect x="398.1" y="181" width="25.6" height="15.0" fill="rgb(105,105,235)" rx="2" ry="2" />
+<text  x="401.13" y="191.5" >l..</text>
+</g>
+<g >
+<title>structseq_dealloc (14,715,287 us, 2.08%)</title><rect x="801.5" y="261" width="24.5" height="15.0" fill="rgb(116,116,226)" rx="2" ry="2" />
+<text  x="804.48" y="271.5" >s..</text>
+</g>
+<g >
+<title>vfs_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="389" width="28.1" height="15.0" fill="rgb(113,113,230)" rx="2" ry="2" />
+<text  x="751.77" y="399.5" >v..</text>
+</g>
+<g >
+<title>handle_mm_fault (16,886,401 us, 2.38%)</title><rect x="748.8" y="245" width="28.1" height="15.0" fill="rgb(118,118,215)" rx="2" ry="2" />
+<text  x="751.77" y="255.5" >h..</text>
+</g>
+<g >
+<title>builtin_exec (31,363,771 us, 4.42%)</title><rect x="345.9" y="677" width="52.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="348.93" y="687.5" >built..</text>
+</g>
+<g >
+<title>llvm::xxh3_64bits (22,309,056 us, 3.15%)</title><rect x="10.0" y="757" width="37.1" height="15.0" fill="rgb(103,103,221)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" >llv..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (145,095 us, 0.02%)</title><rect x="84.3" y="885" width="0.2" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="87.26" y="895.5" ></text>
+</g>
+<g >
+<title>descr_new (8,703,777 us, 1.23%)</title><rect x="578.0" y="709" width="14.5" height="15.0" fill="rgb(131,131,223)" rx="2" ry="2" />
+<text  x="581.00" y="719.5" ></text>
+</g>
+<g >
+<title>_PyType_LookupRef.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="245" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="255.5" >_..</text>
+</g>
+<g >
+<title>_dl_catch_exception (412,775 us, 0.06%)</title><rect x="47.1" y="805" width="0.7" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="50.13" y="815.5" ></text>
+</g>
+<g >
+<title>do_execveat_common.isra.0 (369,368 us, 0.05%)</title><rect x="188.8" y="837" width="0.6" height="15.0" fill="rgb(129,129,226)" rx="2" ry="2" />
+<text  x="191.80" y="847.5" ></text>
+</g>
+<g >
+<title>pyrun_file (227,519,431 us, 32.09%)</title><rect x="657.7" y="789" width="378.7" height="15.0" fill="rgb(130,130,225)" rx="2" ry="2" />
+<text  x="660.71" y="799.5" >pyrun_file</text>
+</g>
+<g >
+<title>func_traverse (15,426,873 us, 2.18%)</title><rect x="215.7" y="181" width="25.6" height="15.0" fill="rgb(124,124,232)" rx="2" ry="2" />
+<text  x="218.67" y="191.5" >f..</text>
+</g>
+<g >
+<title>sync_regs (145,095 us, 0.02%)</title><rect x="84.3" y="869" width="0.2" height="15.0" fill="rgb(127,127,226)" rx="2" ry="2" />
+<text  x="87.26" y="879.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="613" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="218.67" y="623.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="293" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="303.5" >_..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::initialize&lt;pybind11::cpp_function::initialize&lt;int, PerfEventArray, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg&gt; (67,793,487 us, 9.56%)</title><rect x="863.0" y="645" width="112.8" height="15.0" fill="rgb(134,134,231)" rx="2" ry="2" />
+<text  x="865.97" y="655.5" >pybind11::cpp..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="773" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="783.5" >_..</text>
+</g>
+<g >
+<title>slot_tp_new (15,426,873 us, 2.18%)</title><rect x="215.7" y="421" width="25.6" height="15.0" fill="rgb(115,115,223)" rx="2" ry="2" />
+<text  x="218.67" y="431.5" >s..</text>
+</g>
+<g >
+<title>bpf_object_load (15,785,510 us, 2.23%)</title><rect x="975.8" y="549" width="26.3" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="978.81" y="559.5" >b..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="357" width="30.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="595.49" y="367.5" >_P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="325" width="26.4" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="1166.58" y="335.5" >P..</text>
+</g>
+<g >
+<title>folio_alloc_mpol_noprof (16,886,401 us, 2.38%)</title><rect x="748.8" y="181" width="28.1" height="15.0" fill="rgb(134,134,235)" rx="2" ry="2" />
+<text  x="751.77" y="191.5" >f..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="789" width="25.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="218.67" y="799.5" >P..</text>
+</g>
+<g >
+<title>PyFile_OpenCodeObject.localalias (15,368,260 us, 2.17%)</title><rect x="398.1" y="421" width="25.6" height="15.0" fill="rgb(131,131,217)" rx="2" ry="2" />
+<text  x="401.13" y="431.5" >P..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="597" width="127.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="607.5" >PyObject_CallMet..</text>
+</g>
+<g >
+<title>finalize_modules (12,550,303 us, 1.77%)</title><rect x="1061.2" y="805" width="20.9" height="15.0" fill="rgb(126,126,233)" rx="2" ry="2" />
+<text  x="1064.22" y="815.5" ></text>
+</g>
+<g >
+<title>__x64_sys_bpf (15,785,510 us, 2.23%)</title><rect x="975.8" y="373" width="26.3" height="15.0" fill="rgb(120,120,237)" rx="2" ry="2" />
+<text  x="978.81" y="383.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (62,836,908 us, 8.86%)</title><rect x="241.3" y="581" width="104.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="244.34" y="591.5" >cfunction_ve..</text>
+</g>
+<g >
+<title>object_vacall (15,426,873 us, 2.18%)</title><rect x="215.7" y="725" width="25.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="218.67" y="735.5" >o..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (18,155,844 us, 2.56%)</title><rect x="592.5" y="421" width="30.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="595.49" y="431.5" >cf..</text>
+</g>
+<g >
+<title>_dl_relocate_object (21,896,818 us, 3.09%)</title><rect x="47.8" y="821" width="36.5" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="50.82" y="831.5" >_dl..</text>
+</g>
+<g >
+<title>gc_collect_main (12,550,303 us, 1.77%)</title><rect x="1061.2" y="789" width="20.9" height="15.0" fill="rgb(124,124,236)" rx="2" ry="2" />
+<text  x="1064.22" y="799.5" ></text>
+</g>
+<g >
+<title>bitwise_xor_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="69" width="26.2" height="15.0" fill="rgb(108,108,225)" rx="2" ry="2" />
+<text  x="528.71" y="79.5" >b..</text>
+</g>
+<g >
+<title>ksys_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="405" width="28.1" height="15.0" fill="rgb(117,117,230)" rx="2" ry="2" />
+<text  x="751.77" y="415.5" >k..</text>
+</g>
+<g >
+<title>pybind11::detail::argument_loader&lt;PerfEventArray*, int&gt;::load_args (11,129,164 us, 1.57%)</title><rect x="863.0" y="629" width="18.5" height="15.0" fill="rgb(134,134,225)" rx="2" ry="2" />
+<text  x="865.97" y="639.5" ></text>
+</g>
+<g >
+<title>type_param_bound_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="165" width="26.2" height="15.0" fill="rgb(124,124,225)" rx="2" ry="2" />
+<text  x="528.71" y="175.5" >t..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="469" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="479.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>_PyType_AllocNoTrack (15,763,764 us, 2.22%)</title><rect x="449.8" y="229" width="26.2" height="15.0" fill="rgb(124,124,230)" rx="2" ry="2" />
+<text  x="452.81" y="239.5" >_..</text>
+</g>
+<g >
+<title>__x64_sys_openat (267,680 us, 0.04%)</title><rect x="47.4" y="693" width="0.4" height="15.0" fill="rgb(120,120,221)" rx="2" ry="2" />
+<text  x="50.37" y="703.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (12,774,734 us, 1.80%)</title><rect x="900.3" y="469" width="21.3" height="15.0" fill="rgb(122,122,236)" rx="2" ry="2" />
+<text  x="903.33" y="479.5" >s..</text>
+</g>
+<g >
+<title>_dl_map_object_from_fd (238,908 us, 0.03%)</title><rect x="148.8" y="757" width="0.4" height="15.0" fill="rgb(128,128,232)" rx="2" ry="2" />
+<text  x="151.76" y="767.5" ></text>
+</g>
+<g >
+<title>_buffered_raw_tell (15,368,260 us, 2.17%)</title><rect x="398.1" y="245" width="25.6" height="15.0" fill="rgb(108,108,214)" rx="2" ry="2" />
+<text  x="401.13" y="255.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="629" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="639.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="501" width="26.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="528.71" y="511.5" >P..</text>
+</g>
+<g >
+<title>llvm::MCObjectFileInfo::initELFMCObjectFileInfo (22,309,056 us, 3.15%)</title><rect x="10.0" y="805" width="37.1" height="15.0" fill="rgb(103,103,237)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" >llv..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="469" width="26.3" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="192.41" y="479.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="277" width="49.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="779.88" y="287.5" >_PyE..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,447,198 us, 4.44%)</title><rect x="423.7" y="389" width="52.3" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="426.71" y="399.5" >PyEva..</text>
+</g>
+<g >
+<title>alloc_pages_mpol (8,703,777 us, 1.23%)</title><rect x="578.0" y="485" width="14.5" height="15.0" fill="rgb(113,113,225)" rx="2" ry="2" />
+<text  x="581.00" y="495.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (238,908 us, 0.03%)</title><rect x="148.8" y="645" width="0.4" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="151.76" y="655.5" ></text>
+</g>
+<g >
+<title>object_vacall (21,029,491 us, 2.97%)</title><rect x="622.7" y="629" width="35.0" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="625.71" y="639.5" >ob..</text>
+</g>
+<g >
+<title>main (22,309,056 us, 3.15%)</title><rect x="10.0" y="837" width="37.1" height="15.0" fill="rgb(101,101,236)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" >main</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="757" width="26.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="528.71" y="767.5" >P..</text>
+</g>
+<g >
+<title>conjunction_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="117" width="26.2" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="528.71" y="127.5" >c..</text>
+</g>
+<g >
+<title>__lookup_mnt (15,650,833 us, 2.21%)</title><rect x="267.6" y="133" width="26.1" height="15.0" fill="rgb(120,120,232)" rx="2" ry="2" />
+<text  x="270.65" y="143.5" >_..</text>
+</g>
+<g >
+<title>object_vacall (15,731,546 us, 2.22%)</title><rect x="525.7" y="693" width="26.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="528.71" y="703.5" >o..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (18,155,844 us, 2.56%)</title><rect x="592.5" y="693" width="30.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="595.49" y="703.5" >cf..</text>
+</g>
+<g >
+<title>do_anonymous_page (8,703,777 us, 1.23%)</title><rect x="578.0" y="533" width="14.5" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="581.00" y="543.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (8,703,777 us, 1.23%)</title><rect x="578.0" y="517" width="14.5" height="15.0" fill="rgb(109,109,235)" rx="2" ry="2" />
+<text  x="581.00" y="527.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1,082,384 us, 0.15%)</title><rect x="1161.8" y="869" width="1.8" height="15.0" fill="rgb(131,131,230)" rx="2" ry="2" />
+<text  x="1164.78" y="879.5" ></text>
+</g>
+<g >
+<title>builtin_exec (44,895,225 us, 6.33%)</title><rect x="776.9" y="501" width="74.7" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="779.88" y="511.5" >builtin_..</text>
+</g>
+<g >
+<title>PyObject_CallFunction.localalias (15,368,260 us, 2.17%)</title><rect x="398.1" y="341" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="351.5" >P..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,874,803 us, 2.24%)</title><rect x="1163.6" y="517" width="26.4" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="1166.58" y="527.5" >c..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="501" width="26.1" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="554.90" y="511.5" >P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="581" width="102.8" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="751.77" y="591.5" >PyImport_Imp..</text>
+</g>
+<g >
+<title>do_user_addr_fault (8,703,777 us, 1.23%)</title><rect x="578.0" y="581" width="14.5" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="581.00" y="591.5" ></text>
+</g>
+<g >
+<title>statements_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="389" width="26.2" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="528.71" y="399.5" >s..</text>
+</g>
+<g >
+<title>builtin_exec (62,836,908 us, 8.86%)</title><rect x="241.3" y="821" width="104.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="244.34" y="831.5" >builtin_exec</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (29,497,152 us, 4.16%)</title><rect x="776.9" y="389" width="49.1" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="779.88" y="399.5" >cfun..</text>
+</g>
+<g >
+<title>__rmqueue_pcplist (238,908 us, 0.03%)</title><rect x="148.8" y="549" width="0.4" height="15.0" fill="rgb(115,115,220)" rx="2" ry="2" />
+<text  x="151.76" y="559.5" ></text>
+</g>
+<g >
+<title>param_no_default_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="197" width="26.2" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="528.71" y="207.5" >p..</text>
+</g>
+<g >
+<title>object_vacall (15,684,884 us, 2.21%)</title><rect x="551.9" y="309" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="554.90" y="319.5" >o..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="709" width="26.4" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="1166.58" y="719.5" >P..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,426,873 us, 2.18%)</title><rect x="215.7" y="565" width="25.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="218.67" y="575.5" >c..</text>
+</g>
+<g >
+<title>do_syscall_64 (1,082,384 us, 0.15%)</title><rect x="1161.8" y="853" width="1.8" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="1164.78" y="863.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (16,886,401 us, 2.38%)</title><rect x="748.8" y="213" width="28.1" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="751.77" y="223.5" >d..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="437" width="26.4" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1166.58" y="447.5" >P..</text>
+</g>
+<g >
+<title>BpfObject::load (15,785,510 us, 2.23%)</title><rect x="975.8" y="581" width="26.3" height="15.0" fill="rgb(119,119,231)" rx="2" ry="2" />
+<text  x="978.81" y="591.5" >B..</text>
+</g>
+<g >
+<title>builtin___build_class__ (15,426,873 us, 2.18%)</title><rect x="215.7" y="469" width="25.6" height="15.0" fill="rgb(106,106,221)" rx="2" ry="2" />
+<text  x="218.67" y="479.5" >b..</text>
+</g>
+<g >
+<title>_io_BufferedReader___init__ (15,368,260 us, 2.17%)</title><rect x="398.1" y="277" width="25.6" height="15.0" fill="rgb(119,119,220)" rx="2" ry="2" />
+<text  x="401.13" y="287.5" >_..</text>
+</g>
+<g >
+<title>pybind11::cpp_function::dispatcher (83,578,997 us, 11.79%)</title><rect x="863.0" y="677" width="139.1" height="15.0" fill="rgb(134,134,228)" rx="2" ry="2" />
+<text  x="865.97" y="687.5" >pybind11::cpp_fun..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="597" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="607.5" >_..</text>
+</g>
+<g >
+<title>bpf_object__load (15,785,510 us, 2.23%)</title><rect x="975.8" y="565" width="26.3" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="978.81" y="575.5" >b..</text>
+</g>
+<g >
+<title>block_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="325" width="26.2" height="15.0" fill="rgb(108,108,225)" rx="2" ry="2" />
+<text  x="528.71" y="335.5" >b..</text>
+</g>
+<g >
+<title>_dl_map_object_deps (238,908 us, 0.03%)</title><rect x="148.8" y="821" width="0.4" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="151.76" y="831.5" ></text>
+</g>
+<g >
+<title>perf_buffer__poll (38,369,056 us, 5.41%)</title><rect x="881.5" y="565" width="63.9" height="15.0" fill="rgb(128,128,216)" rx="2" ry="2" />
+<text  x="884.50" y="575.5" >perf_bu..</text>
+</g>
+<g >
+<title>compound_stmt_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="373" width="26.2" height="15.0" fill="rgb(119,119,225)" rx="2" ry="2" />
+<text  x="528.71" y="383.5" >c..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="613" width="52.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="348.93" y="623.5" >PyObj..</text>
+</g>
+<g >
+<title>r_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="373" width="26.3" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="322.59" y="383.5" >r..</text>
+</g>
+<g >
+<title>builtin___build_class__ (15,398,073 us, 2.17%)</title><rect x="826.0" y="421" width="25.6" height="15.0" fill="rgb(106,106,221)" rx="2" ry="2" />
+<text  x="828.97" y="431.5" >b..</text>
+</g>
+<g >
+<title>builtin_exec (15,426,873 us, 2.18%)</title><rect x="215.7" y="549" width="25.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="218.67" y="559.5" >b..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="661" width="30.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="595.49" y="671.5" >Py..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="533" width="26.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="543.5" >P..</text>
+</g>
+<g >
+<title>alloc_pages_mpol (238,908 us, 0.03%)</title><rect x="148.8" y="597" width="0.4" height="15.0" fill="rgb(113,113,225)" rx="2" ry="2" />
+<text  x="151.76" y="607.5" ></text>
+</g>
+<g >
+<title>pybind11::cpp_function::cpp_function&lt;int, PerfEventArray, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg&gt; (56,664,323 us, 7.99%)</title><rect x="881.5" y="597" width="94.3" height="15.0" fill="rgb(134,134,231)" rx="2" ry="2" />
+<text  x="884.50" y="607.5" >pybind11::c..</text>
+</g>
+<g >
+<title>do_filp_open (267,680 us, 0.04%)</title><rect x="47.4" y="661" width="0.4" height="15.0" fill="rgb(129,129,239)" rx="2" ry="2" />
+<text  x="50.37" y="671.5" ></text>
+</g>
+<g >
+<title>bitwise_or_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="85" width="26.2" height="15.0" fill="rgb(108,108,225)" rx="2" ry="2" />
+<text  x="528.71" y="95.5" >b..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="709" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="719.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="709" width="26.1" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="554.90" y="719.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (47,013,185 us, 6.63%)</title><rect x="241.3" y="437" width="78.3" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="244.34" y="447.5" >builtin_e..</text>
+</g>
+<g >
+<title>do_sys_openat2 (267,680 us, 0.04%)</title><rect x="47.4" y="677" width="0.4" height="15.0" fill="rgb(129,129,236)" rx="2" ry="2" />
+<text  x="50.37" y="687.5" ></text>
+</g>
+<g >
+<title>visit_reachable (15,426,873 us, 2.18%)</title><rect x="215.7" y="165" width="25.6" height="15.0" fill="rgb(109,109,230)" rx="2" ry="2" />
+<text  x="218.67" y="175.5" >v..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="341" width="49.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="779.88" y="351.5" >_PyE..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="581" width="26.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="528.71" y="591.5" >P..</text>
+</g>
+<g >
+<title>take_gil (18,198,346 us, 2.57%)</title><rect x="945.5" y="533" width="30.3" height="15.0" fill="rgb(106,106,217)" rx="2" ry="2" />
+<text  x="948.52" y="543.5" >ta..</text>
+</g>
+<g >
+<title>_PyCodec_Lookup (21,029,491 us, 2.97%)</title><rect x="622.7" y="741" width="35.0" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="625.71" y="751.5" >_P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="533" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="543.5" >_..</text>
+</g>
+<g >
+<title>object_vacall (62,836,908 us, 8.86%)</title><rect x="241.3" y="869" width="104.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="244.34" y="879.5" >object_vacall</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="709" width="26.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="528.71" y="719.5" >P..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="869" width="26.4" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="1166.58" y="879.5" >P..</text>
+</g>
+<g >
+<title>folio_alloc_mpol_noprof (8,703,777 us, 1.23%)</title><rect x="578.0" y="501" width="14.5" height="15.0" fill="rgb(134,134,235)" rx="2" ry="2" />
+<text  x="581.00" y="511.5" ></text>
+</g>
+<g >
+<title>LLVMInitializeXCoreTarget (20,748,165 us, 2.93%)</title><rect x="84.5" y="821" width="34.5" height="15.0" fill="rgb(112,112,225)" rx="2" ry="2" />
+<text  x="87.50" y="831.5" >LL..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,774,847 us, 2.23%)</title><rect x="189.4" y="741" width="26.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="751.5" >c..</text>
+</g>
+<g >
+<title>_PyRun_AnyFileObject (227,519,431 us, 32.09%)</title><rect x="657.7" y="821" width="378.7" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="660.71" y="831.5" >_PyRun_AnyFileObject</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="613" width="127.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="401.13" y="623.5" >PyImport_ImportM..</text>
+</g>
+<g >
+<title>r_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="405" width="26.3" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="322.59" y="415.5" >r..</text>
+</g>
+<g >
+<title>run_mod (18,155,844 us, 2.56%)</title><rect x="592.5" y="501" width="30.2" height="15.0" fill="rgb(120,120,243)" rx="2" ry="2" />
+<text  x="595.49" y="511.5" >ru..</text>
+</g>
+<g >
+<title>exc_page_fault (8,703,777 us, 1.23%)</title><rect x="578.0" y="597" width="14.5" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="581.00" y="607.5" ></text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="805" width="104.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="244.34" y="815.5" >PyEval_EvalC..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="581" width="26.3" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="192.41" y="591.5" >P..</text>
+</g>
+<g >
+<title>_io_FileIO_readall_impl (16,886,401 us, 2.38%)</title><rect x="748.8" y="485" width="28.1" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="751.77" y="495.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="597" width="30.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="595.49" y="607.5" >Py..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="741" width="52.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="348.93" y="751.5" >PyObj..</text>
+</g>
+<g >
+<title>_PyRun_StringFlagsWithName.constprop.0 (15,763,764 us, 2.22%)</title><rect x="449.8" y="341" width="26.2" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="452.81" y="351.5" >_..</text>
+</g>
+<g >
+<title>_Py_CheckFunctionResult.localalias (15,440,321 us, 2.18%)</title><rect x="372.4" y="245" width="25.7" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="375.43" y="255.5" >_..</text>
+</g>
+<g >
+<title>_PyObject_GC_New.localalias (15,694,067 us, 2.21%)</title><rect x="722.7" y="693" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="725.65" y="703.5" >_..</text>
+</g>
+<g >
+<title>builtin_exec (15,874,803 us, 2.24%)</title><rect x="1163.6" y="501" width="26.4" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="1166.58" y="511.5" >b..</text>
+</g>
+<g >
+<title>method_vectorcall_NOARGS (15,368,260 us, 2.17%)</title><rect x="398.1" y="213" width="25.6" height="15.0" fill="rgb(111,111,225)" rx="2" ry="2" />
+<text  x="401.13" y="223.5" >m..</text>
+</g>
+<g >
+<title>_PyObject_GetMethod.localalias (6,832,183 us, 0.96%)</title><rect x="851.6" y="709" width="11.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="854.60" y="719.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (15,368,260 us, 2.17%)</title><rect x="398.1" y="149" width="25.6" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="401.13" y="159.5" >d..</text>
+</g>
+<g >
+<title>sys_bpf (15,785,510 us, 2.23%)</title><rect x="975.8" y="437" width="26.3" height="15.0" fill="rgb(123,123,237)" rx="2" ry="2" />
+<text  x="978.81" y="447.5" >s..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="533" width="25.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="218.67" y="543.5" >P..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="837" width="26.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="528.71" y="847.5" >P..</text>
+</g>
+<g >
+<title>[libLLVM.so.21.1] (17,855,857 us, 2.52%)</title><rect x="119.0" y="805" width="29.8" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="122.04" y="815.5" >[l..</text>
+</g>
+<g >
+<title>compiler_setup (15,763,764 us, 2.22%)</title><rect x="449.8" y="293" width="26.2" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="452.81" y="303.5" >c..</text>
+</g>
+<g >
+<title>PyImport_Import.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="741" width="30.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="595.49" y="751.5" >Py..</text>
+</g>
+<g >
+<title>perf-exec (369,368 us, 0.05%)</title><rect x="188.8" y="901" width="0.6" height="15.0" fill="rgb(128,128,225)" rx="2" ry="2" />
+<text  x="191.80" y="911.5" ></text>
+</g>
+<g >
+<title>bprm_execve (369,368 us, 0.05%)</title><rect x="188.8" y="821" width="0.6" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="191.80" y="831.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,774,847 us, 2.23%)</title><rect x="189.4" y="517" width="26.3" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="192.41" y="527.5" >o..</text>
+</g>
+<g >
+<title>_dl_map_object (412,775 us, 0.06%)</title><rect x="47.1" y="773" width="0.7" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="50.13" y="783.5" ></text>
+</g>
+<g >
+<title>marshal_loads (29,839,460 us, 4.21%)</title><rect x="476.0" y="421" width="49.7" height="15.0" fill="rgb(104,104,233)" rx="2" ry="2" />
+<text  x="479.05" y="431.5" >marsh..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="565" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="575.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,874,803 us, 2.24%)</title><rect x="1163.6" y="645" width="26.4" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="1166.58" y="655.5" >c..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="677" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="554.90" y="687.5" >P..</text>
+</g>
+<g >
+<title>ip_rcv_core (191,733 us, 0.03%)</title><rect x="188.8" y="581" width="0.3" height="15.0" fill="rgb(117,117,235)" rx="2" ry="2" />
+<text  x="191.80" y="591.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (96,751 us, 0.01%)</title><rect x="188.6" y="821" width="0.2" height="15.0" fill="rgb(117,117,215)" rx="2" ry="2" />
+<text  x="191.63" y="831.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="309" width="49.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="779.88" y="319.5" >PyOb..</text>
+</g>
+<g >
+<title>bitwise_and_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="53" width="26.2" height="15.0" fill="rgb(108,108,225)" rx="2" ry="2" />
+<text  x="528.71" y="63.5" >b..</text>
+</g>
+<g >
+<title>filename_lookup (31,209,155 us, 4.40%)</title><rect x="267.6" y="197" width="52.0" height="15.0" fill="rgb(127,127,224)" rx="2" ry="2" />
+<text  x="270.65" y="207.5" >filen..</text>
+</g>
+<g >
+<title>PyDict_GetItemRef.localalias (15,923,450 us, 2.25%)</title><rect x="345.9" y="245" width="26.5" height="15.0" fill="rgb(133,133,217)" rx="2" ry="2" />
+<text  x="348.93" y="255.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (15,426,873 us, 2.18%)</title><rect x="215.7" y="805" width="25.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="218.67" y="815.5" >b..</text>
+</g>
+<g >
+<title>_PyRun_SimpleFileObject (31,363,771 us, 4.42%)</title><rect x="345.9" y="853" width="52.2" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="348.93" y="863.5" >_PyRu..</text>
+</g>
+<g >
+<title>_PyRun_StringFlagsWithName.constprop.0 (18,155,844 us, 2.56%)</title><rect x="592.5" y="517" width="30.2" height="15.0" fill="rgb(124,124,224)" rx="2" ry="2" />
+<text  x="595.49" y="527.5" >_P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="421" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="431.5" >_..</text>
+</g>
+<g >
+<title>_start (62,660,371 us, 8.84%)</title><rect x="84.5" y="885" width="104.3" height="15.0" fill="rgb(116,116,227)" rx="2" ry="2" />
+<text  x="87.50" y="895.5" >_start</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,731,546 us, 2.22%)</title><rect x="525.7" y="789" width="26.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="528.71" y="799.5" >c..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="581" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="591.5" >_PyEv..</text>
+</g>
+<g >
+<title>disjunction_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="133" width="26.2" height="15.0" fill="rgb(126,126,225)" rx="2" ry="2" />
+<text  x="528.71" y="143.5" >d..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="693" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="703.5" >_..</text>
+</g>
+<g >
+<title>_PyPegen_parse (15,731,546 us, 2.22%)</title><rect x="525.7" y="405" width="26.2" height="15.0" fill="rgb(124,124,232)" rx="2" ry="2" />
+<text  x="528.71" y="415.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="261" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="271.5" >_PyEv..</text>
+</g>
+<g >
+<title>__tls_get_addr (96,921 us, 0.01%)</title><rect x="945.4" y="533" width="0.1" height="15.0" fill="rgb(113,113,233)" rx="2" ry="2" />
+<text  x="948.36" y="543.5" ></text>
+</g>
+<g >
+<title>std::enable_if&lt;!std::is_void&lt;int&gt;::value, int&gt;::type pybind11::detail::argument_loader&lt;PerfEventArray*, int&gt;::call&lt;int, pybind11::detail::void_type, pybind11::cpp_function::cpp_function&lt;int, PerfEventArray, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg&gt; (56,664,323 us, 7.99%)</title><rect x="881.5" y="629" width="94.3" height="15.0" fill="rgb(118,118,231)" rx="2" ry="2" />
+<text  x="884.50" y="639.5" >std::enable..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (76,654,918 us, 10.81%)</title><rect x="398.1" y="677" width="127.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="401.13" y="687.5" >cfunction_vector..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="453" width="49.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="779.88" y="463.5" >PyIm..</text>
+</g>
+<g >
+<title>_PyModuleSpec_IsInitializing.part.0 (15,874,803 us, 2.24%)</title><rect x="1163.6" y="293" width="26.4" height="15.0" fill="rgb(124,124,221)" rx="2" ry="2" />
+<text  x="1166.58" y="303.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,684,884 us, 2.21%)</title><rect x="551.9" y="613" width="26.1" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="554.90" y="623.5" >c..</text>
+</g>
+<g >
+<title>PyUnicode_New.part.0 (8,703,777 us, 1.23%)</title><rect x="578.0" y="661" width="14.5" height="15.0" fill="rgb(139,139,221)" rx="2" ry="2" />
+<text  x="581.00" y="671.5" ></text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,416,430 us, 4.43%)</title><rect x="525.7" y="869" width="52.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="528.71" y="879.5" >cfunc..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,363,771 us, 4.42%)</title><rect x="345.9" y="309" width="52.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="348.93" y="319.5" >cfunc..</text>
+</g>
+<g >
+<title>_PyObject_CallFunctionVa (15,368,260 us, 2.17%)</title><rect x="398.1" y="389" width="25.6" height="15.0" fill="rgb(124,124,219)" rx="2" ry="2" />
+<text  x="401.13" y="399.5" >_..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,683,434 us, 2.21%)</title><rect x="423.7" y="357" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="426.71" y="367.5" >P..</text>
+</g>
+<g >
+<title>PyObject_SetAttr.localalias (15,683,434 us, 2.21%)</title><rect x="423.7" y="293" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="426.71" y="303.5" >P..</text>
+</g>
+<g >
+<title>exc_page_fault (96,751 us, 0.01%)</title><rect x="188.6" y="805" width="0.2" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="191.63" y="815.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,774,847 us, 2.23%)</title><rect x="189.4" y="437" width="26.3" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="192.41" y="447.5" >o..</text>
+</g>
+<g >
+<title>builtin_exec (18,155,844 us, 2.56%)</title><rect x="592.5" y="533" width="30.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="595.49" y="543.5" >bu..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="597" width="102.8" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="751.77" y="607.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>Py_BytesMain (47,889,112 us, 6.75%)</title><rect x="578.0" y="837" width="79.7" height="15.0" fill="rgb(130,130,236)" rx="2" ry="2" />
+<text  x="581.00" y="847.5" >Py_BytesM..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,731,546 us, 2.22%)</title><rect x="525.7" y="661" width="26.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="528.71" y="671.5" >c..</text>
+</g>
+<g >
+<title>__x64_sys_execve (369,368 us, 0.05%)</title><rect x="188.8" y="853" width="0.6" height="15.0" fill="rgb(120,120,231)" rx="2" ry="2" />
+<text  x="191.80" y="863.5" ></text>
+</g>
+<g >
+<title>r_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="373" width="49.7" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="479.05" y="383.5" >r_obj..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,201,720 us, 4.40%)</title><rect x="189.4" y="837" width="51.9" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="847.5" >_PyEv..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="357" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="367.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="341" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="351.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="629" width="26.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="528.71" y="639.5" >P..</text>
+</g>
+<g >
+<title>_PyObject_GenericGetAttrWithDict.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="261" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="271.5" >_..</text>
+</g>
+<g >
+<title>optMain (38,604,022 us, 5.45%)</title><rect x="84.5" y="837" width="64.3" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="87.50" y="847.5" >optMain</text>
+</g>
+<g >
+<title>do_fault (96,751 us, 0.01%)</title><rect x="188.6" y="741" width="0.2" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="191.63" y="751.5" ></text>
+</g>
+<g >
+<title>cfunction_vectorcall_NOARGS (15,804,030 us, 2.23%)</title><rect x="241.3" y="309" width="26.3" height="15.0" fill="rgb(109,109,225)" rx="2" ry="2" />
+<text  x="244.34" y="319.5" >c..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="453" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="554.90" y="463.5" >P..</text>
+</g>
+<g >
+<title>__handle_mm_fault (16,886,401 us, 2.38%)</title><rect x="748.8" y="229" width="28.1" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="751.77" y="239.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (61,781,626 us, 8.71%)</title><rect x="748.8" y="645" width="102.8" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="751.77" y="655.5" >cfunction_ve..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="613" width="26.4" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="1166.58" y="623.5" >P..</text>
+</g>
+<g >
+<title>folio_batch_move_lru (96,751 us, 0.01%)</title><rect x="149.2" y="693" width="0.1" height="15.0" fill="rgb(134,134,226)" rx="2" ry="2" />
+<text  x="152.15" y="703.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="629" width="104.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="244.34" y="639.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>virtnet_poll (369,352 us, 0.05%)</title><rect x="188.8" y="661" width="0.6" height="15.0" fill="rgb(110,110,216)" rx="2" ry="2" />
+<text  x="191.80" y="671.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="453" width="30.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="595.49" y="463.5" >_P..</text>
+</g>
+<g >
+<title>_PyUnicode_FromUCS1 (29,839,460 us, 4.21%)</title><rect x="476.0" y="309" width="49.7" height="15.0" fill="rgb(124,124,215)" rx="2" ry="2" />
+<text  x="479.05" y="319.5" >_PyUn..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="853" width="127.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="863.5" >PyObject_CallMet..</text>
+</g>
+<g >
+<title>all (708,967,289 us, 100%)</title><rect x="10.0" y="917" width="1180.0" height="15.0" fill="rgb(140,140,245)" rx="2" ry="2" />
+<text  x="13.00" y="927.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="501" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="511.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,426,873 us, 2.18%)</title><rect x="215.7" y="485" width="25.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="218.67" y="495.5" >c..</text>
+</g>
+<g >
+<title>object_vacall (62,836,908 us, 8.86%)</title><rect x="241.3" y="613" width="104.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="244.34" y="623.5" >object_vacall</text>
+</g>
+<g >
+<title>__GI___fstatat64 (31,209,155 us, 4.40%)</title><rect x="267.6" y="293" width="52.0" height="15.0" fill="rgb(111,111,222)" rx="2" ry="2" />
+<text  x="270.65" y="303.5" >__GI_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="645" width="127.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="401.13" y="655.5" >PyEval_EvalCode...</text>
+</g>
+<g >
+<title>builtin_exec (15,874,803 us, 2.24%)</title><rect x="1163.6" y="885" width="26.4" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="1166.58" y="895.5" >b..</text>
+</g>
+<g >
+<title>pybind11::gil_scoped_release::~gil_scoped_release (18,295,267 us, 2.58%)</title><rect x="945.4" y="565" width="30.4" height="15.0" fill="rgb(134,134,236)" rx="2" ry="2" />
+<text  x="948.36" y="575.5" >py..</text>
+</g>
+<g >
+<title>llvm::MCContext::getELFSection (22,309,056 us, 3.15%)</title><rect x="10.0" y="789" width="37.1" height="15.0" fill="rgb(103,103,236)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" >llv..</text>
+</g>
+<g >
+<title>object_vacall (15,684,884 us, 2.21%)</title><rect x="551.9" y="437" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="554.90" y="447.5" >o..</text>
+</g>
+<g >
+<title>llvm::PassRegistry::registerPass (20,748,165 us, 2.93%)</title><rect x="84.5" y="789" width="34.5" height="15.0" fill="rgb(103,103,228)" rx="2" ry="2" />
+<text  x="87.50" y="799.5" >ll..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="613" width="35.0" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="625.71" y="623.5" >_P..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="549" width="104.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="244.34" y="559.5" >PyEval_EvalC..</text>
+</g>
+<g >
+<title>arena_map_is_used (14,715,287 us, 2.08%)</title><rect x="801.5" y="229" width="24.5" height="15.0" fill="rgb(115,115,237)" rx="2" ry="2" />
+<text  x="804.48" y="239.5" >a..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="597" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="607.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>method_vectorcall (21,029,491 us, 2.97%)</title><rect x="622.7" y="581" width="35.0" height="15.0" fill="rgb(111,111,218)" rx="2" ry="2" />
+<text  x="625.71" y="591.5" >me..</text>
+</g>
+<g >
+<title>vfs_fstatat (31,209,155 us, 4.40%)</title><rect x="267.6" y="229" width="52.0" height="15.0" fill="rgb(113,113,216)" rx="2" ry="2" />
+<text  x="270.65" y="239.5" >vfs_f..</text>
+</g>
+<g >
+<title>bool pybind11::detail::argument_loader&lt;PerfEventArray*, int&gt;::load_impl_sequence&lt;0ul, 1ul&gt; (11,129,164 us, 1.57%)</title><rect x="863.0" y="613" width="18.5" height="15.0" fill="rgb(119,119,223)" rx="2" ry="2" />
+<text  x="865.97" y="623.5" ></text>
+</g>
+<g >
+<title>opt (62,660,371 us, 8.84%)</title><rect x="84.5" y="901" width="104.3" height="15.0" fill="rgb(128,128,228)" rx="2" ry="2" />
+<text  x="87.50" y="911.5" >opt</text>
+</g>
+<g >
+<title>_dl_new_object (96,751 us, 0.01%)</title><rect x="149.2" y="821" width="0.1" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="152.15" y="831.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="581" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="591.5" >_..</text>
+</g>
+<g >
+<title>run_mod (31,363,771 us, 4.42%)</title><rect x="345.9" y="821" width="52.2" height="15.0" fill="rgb(120,120,243)" rx="2" ry="2" />
+<text  x="348.93" y="831.5" >run_mod</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="277" width="52.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="348.93" y="287.5" >PyEva..</text>
+</g>
+<g >
+<title>Py_RunMain.localalias (302,853,746 us, 42.72%)</title><rect x="657.7" y="837" width="504.1" height="15.0" fill="rgb(130,130,217)" rx="2" ry="2" />
+<text  x="660.71" y="847.5" >Py_RunMain.localalias</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="469" width="26.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="554.90" y="479.5" >P..</text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (369,366 us, 0.05%)</title><rect x="188.8" y="741" width="0.6" height="15.0" fill="rgb(123,123,224)" rx="2" ry="2" />
+<text  x="191.80" y="751.5" ></text>
+</g>
+<g >
+<title>_Py_read (16,886,401 us, 2.38%)</title><rect x="748.8" y="469" width="28.1" height="15.0" fill="rgb(124,124,230)" rx="2" ry="2" />
+<text  x="751.77" y="479.5" >_..</text>
+</g>
+<g >
+<title>do_syscall_64 (31,209,155 us, 4.40%)</title><rect x="267.6" y="261" width="52.0" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="270.65" y="271.5" >do_sy..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="357" width="26.4" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="1166.58" y="367.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="613" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="623.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="549" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="559.5" >_..</text>
+</g>
+<g >
+<title>open_verify.constprop.0 (267,680 us, 0.04%)</title><rect x="47.4" y="757" width="0.4" height="15.0" fill="rgb(131,131,224)" rx="2" ry="2" />
+<text  x="50.37" y="767.5" ></text>
+</g>
+<g >
+<title>_PyObject_GC_New.localalias (6,832,183 us, 0.96%)</title><rect x="851.6" y="677" width="11.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="854.60" y="687.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (369,352 us, 0.05%)</title><rect x="188.8" y="709" width="0.6" height="15.0" fill="rgb(118,118,227)" rx="2" ry="2" />
+<text  x="191.80" y="719.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="501" width="26.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="192.41" y="511.5" >_..</text>
+</g>
+<g >
+<title>init_interp_main (39,185,335 us, 5.53%)</title><rect x="592.5" y="773" width="65.2" height="15.0" fill="rgb(122,122,236)" rx="2" ry="2" />
+<text  x="595.49" y="783.5" >init_in..</text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (238,908 us, 0.03%)</title><rect x="148.8" y="629" width="0.4" height="15.0" fill="rgb(109,109,235)" rx="2" ry="2" />
+<text  x="151.76" y="639.5" ></text>
+</g>
+<g >
+<title>shift_expr_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="37" width="26.2" height="15.0" fill="rgb(115,115,225)" rx="2" ry="2" />
+<text  x="528.71" y="47.5" >s..</text>
+</g>
+<g >
+<title>syscall (15,785,510 us, 2.23%)</title><rect x="975.8" y="421" width="26.3" height="15.0" fill="rgb(123,123,218)" rx="2" ry="2" />
+<text  x="978.81" y="431.5" >s..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="661" width="35.0" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="625.71" y="671.5" >Py..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="789" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="799.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>do_epoll_wait (12,774,734 us, 1.80%)</title><rect x="900.3" y="485" width="21.3" height="15.0" fill="rgb(129,129,225)" rx="2" ry="2" />
+<text  x="903.33" y="495.5" >d..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="693" width="102.8" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="751.77" y="703.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>builtin_exec (15,774,847 us, 2.23%)</title><rect x="189.4" y="725" width="26.3" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="192.41" y="735.5" >b..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="645" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="655.5" >_..</text>
+</g>
+<g >
+<title>run_eval_code_obj (31,363,771 us, 4.42%)</title><rect x="345.9" y="805" width="52.2" height="15.0" fill="rgb(120,120,219)" rx="2" ry="2" />
+<text  x="348.93" y="815.5" >run_e..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="805" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="815.5" >_..</text>
+</g>
+<g >
+<title>PyObject_CallOneArg.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="725" width="35.0" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="625.71" y="735.5" >Py..</text>
+</g>
+<g >
+<title>_PyObject_CallFunctionVa (15,368,260 us, 2.17%)</title><rect x="398.1" y="325" width="25.6" height="15.0" fill="rgb(124,124,219)" rx="2" ry="2" />
+<text  x="401.13" y="335.5" >_..</text>
+</g>
+<g >
+<title>_PySymtable_Build (15,763,764 us, 2.22%)</title><rect x="449.8" y="277" width="26.2" height="15.0" fill="rgb(124,124,227)" rx="2" ry="2" />
+<text  x="452.81" y="287.5" >_..</text>
+</g>
+<g >
+<title>_PyDict_Next (14,916,913 us, 2.10%)</title><rect x="1036.4" y="789" width="24.8" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1039.39" y="799.5" >_..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (61,781,626 us, 8.71%)</title><rect x="748.8" y="565" width="102.8" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="751.77" y="575.5" >PyObject_Cal..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (29,497,152 us, 4.16%)</title><rect x="776.9" y="325" width="49.1" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="779.88" y="335.5" >PyIm..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="533" width="52.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="348.93" y="543.5" >PyEva..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="565" width="26.4" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1166.58" y="575.5" >P..</text>
+</g>
+<g >
+<title>object_vacall (15,774,847 us, 2.23%)</title><rect x="189.4" y="645" width="26.3" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="192.41" y="655.5" >o..</text>
+</g>
+<g >
+<title>x64_sys_call (6,325,901 us, 0.89%)</title><rect x="934.8" y="501" width="10.6" height="15.0" fill="rgb(123,123,218)" rx="2" ry="2" />
+<text  x="937.83" y="511.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="757" width="25.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="218.67" y="767.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (61,781,626 us, 8.71%)</title><rect x="748.8" y="629" width="102.8" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="751.77" y="639.5" >builtin_exec</text>
+</g>
+<g >
+<title>r_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="389" width="49.7" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="479.05" y="399.5" >r_obj..</text>
+</g>
+<g >
+<title>_PyThreadState_Attach (15,804,030 us, 2.23%)</title><rect x="241.3" y="277" width="26.3" height="15.0" fill="rgb(124,124,236)" rx="2" ry="2" />
+<text  x="244.34" y="287.5" >_..</text>
+</g>
+<g >
+<title>Py_InitializeFromConfig.part.0 (47,889,112 us, 6.75%)</title><rect x="578.0" y="805" width="79.7" height="15.0" fill="rgb(130,130,221)" rx="2" ry="2" />
+<text  x="581.00" y="815.5" >Py_Initia..</text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="437" width="30.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="595.49" y="447.5" >Py..</text>
+</g>
+<g >
+<title>param_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="181" width="26.2" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="528.71" y="191.5" >p..</text>
+</g>
+<g >
+<title>builtin_exec (15,731,546 us, 2.22%)</title><rect x="525.7" y="469" width="26.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="528.71" y="479.5" >b..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,368,260 us, 2.17%)</title><rect x="398.1" y="373" width="25.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="401.13" y="383.5" >c..</text>
+</g>
+<g >
+<title>_PyAST_Compile.localalias (15,763,764 us, 2.22%)</title><rect x="449.8" y="309" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="452.81" y="319.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="821" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="831.5" >_..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,684,884 us, 2.21%)</title><rect x="551.9" y="405" width="26.1" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="554.90" y="415.5" >c..</text>
+</g>
+<g >
+<title>do_user_addr_fault (96,751 us, 0.01%)</title><rect x="188.6" y="789" width="0.2" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="191.63" y="799.5" ></text>
+</g>
+<g >
+<title>schedule (6,449,537 us, 0.91%)</title><rect x="910.9" y="453" width="10.7" height="15.0" fill="rgb(122,122,225)" rx="2" ry="2" />
+<text  x="913.85" y="463.5" ></text>
+</g>
+<g >
+<title>pymain_init (47,889,112 us, 6.75%)</title><rect x="578.0" y="821" width="79.7" height="15.0" fill="rgb(134,134,224)" rx="2" ry="2" />
+<text  x="581.00" y="831.5" >pymain_init</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="693" width="26.4" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="1166.58" y="703.5" >P..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,683,434 us, 2.21%)</title><rect x="423.7" y="309" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="426.71" y="319.5" >_..</text>
+</g>
+<g >
+<title>r_object (29,839,460 us, 4.21%)</title><rect x="476.0" y="325" width="49.7" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="479.05" y="335.5" >r_obj..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="661" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="554.90" y="671.5" >P..</text>
+</g>
+<g >
+<title>__folio_batch_add_and_move (15,858,868 us, 2.24%)</title><rect x="499.3" y="165" width="26.4" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="502.32" y="175.5" >_..</text>
+</g>
+<g >
+<title>builtin_exec (15,426,873 us, 2.18%)</title><rect x="215.7" y="677" width="25.6" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="218.67" y="687.5" >b..</text>
+</g>
+<g >
+<title>exc_page_fault (238,908 us, 0.03%)</title><rect x="148.8" y="709" width="0.4" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="151.76" y="719.5" ></text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="517" width="127.6" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="401.13" y="527.5" >PyEval_EvalCode...</text>
+</g>
+<g >
+<title>do_syscall_64 (38,122,810 us, 5.38%)</title><rect x="881.9" y="517" width="63.5" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="884.91" y="527.5" >do_sys..</text>
+</g>
+<g >
+<title>object_vacall (15,774,847 us, 2.23%)</title><rect x="189.4" y="773" width="26.3" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="192.41" y="783.5" >o..</text>
+</g>
+<g >
+<title>__handle_mm_fault (96,751 us, 0.01%)</title><rect x="188.6" y="757" width="0.2" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="191.63" y="767.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="405" width="26.4" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="1166.58" y="415.5" >_..</text>
+</g>
+<g >
+<title>function_def_raw_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="261" width="26.2" height="15.0" fill="rgb(124,124,225)" rx="2" ry="2" />
+<text  x="528.71" y="271.5" >f..</text>
+</g>
+<g >
+<title>__napi_poll (369,352 us, 0.05%)</title><rect x="188.8" y="677" width="0.6" height="15.0" fill="rgb(118,118,216)" rx="2" ry="2" />
+<text  x="191.80" y="687.5" ></text>
+</g>
+<g >
+<title>openaux (412,775 us, 0.06%)</title><rect x="47.1" y="789" width="0.7" height="15.0" fill="rgb(131,131,235)" rx="2" ry="2" />
+<text  x="50.13" y="799.5" ></text>
+</g>
+<g >
+<title>_copy_to_iter (16,886,401 us, 2.38%)</title><rect x="748.8" y="309" width="28.1" height="15.0" fill="rgb(127,127,228)" rx="2" ry="2" />
+<text  x="751.77" y="319.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="325" width="52.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="348.93" y="335.5" >_PyEv..</text>
+</g>
+<g >
+<title>marshal_loads (15,823,723 us, 2.23%)</title><rect x="319.6" y="453" width="26.3" height="15.0" fill="rgb(104,104,233)" rx="2" ry="2" />
+<text  x="322.59" y="463.5" >m..</text>
+</g>
+<g >
+<title>filemap_map_pages (96,751 us, 0.01%)</title><rect x="188.6" y="725" width="0.2" height="15.0" fill="rgb(127,127,227)" rx="2" ry="2" />
+<text  x="191.63" y="735.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (2,920,151 us, 0.41%)</title><rect x="183.8" y="789" width="4.8" height="15.0" fill="rgb(122,122,215)" rx="2" ry="2" />
+<text  x="186.77" y="799.5" ></text>
+</g>
+<g >
+<title>hrtimer_start_range_ns (6,325,197 us, 0.89%)</title><rect x="900.3" y="453" width="10.6" height="15.0" fill="rgb(119,119,226)" rx="2" ry="2" />
+<text  x="903.33" y="463.5" ></text>
+</g>
+<g >
+<title>function_def_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="277" width="26.2" height="15.0" fill="rgb(124,124,225)" rx="2" ry="2" />
+<text  x="528.71" y="287.5" >f..</text>
+</g>
+<g >
+<title>object_vacall (76,654,918 us, 10.81%)</title><rect x="398.1" y="581" width="127.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="401.13" y="591.5" >object_vacall</text>
+</g>
+<g >
+<title>begin_new_exec (369,368 us, 0.05%)</title><rect x="188.8" y="789" width="0.6" height="15.0" fill="rgb(114,114,225)" rx="2" ry="2" />
+<text  x="191.80" y="799.5" ></text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,683,434 us, 2.21%)</title><rect x="423.7" y="341" width="26.1" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="426.71" y="351.5" >P..</text>
+</g>
+<g >
+<title>builtin_exec (15,684,884 us, 2.21%)</title><rect x="551.9" y="725" width="26.1" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="554.90" y="735.5" >b..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="725" width="26.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="528.71" y="735.5" >P..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="629" width="25.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="218.67" y="639.5" >P..</text>
+</g>
+<g >
+<title>do_syscall_64 (369,368 us, 0.05%)</title><rect x="188.8" y="869" width="0.6" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="191.80" y="879.5" ></text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="629" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="639.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (47,013,185 us, 6.63%)</title><rect x="241.3" y="421" width="78.3" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="244.34" y="431.5" >PyEval_Ev..</text>
+</g>
+<g >
+<title>get_page_from_freelist (238,908 us, 0.03%)</title><rect x="148.8" y="565" width="0.4" height="15.0" fill="rgb(124,124,220)" rx="2" ry="2" />
+<text  x="151.76" y="575.5" ></text>
+</g>
+<g >
+<title>perf_event_exec (369,368 us, 0.05%)</title><rect x="188.8" y="773" width="0.6" height="15.0" fill="rgb(128,128,225)" rx="2" ry="2" />
+<text  x="191.80" y="783.5" ></text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (31,363,771 us, 4.42%)</title><rect x="345.9" y="437" width="52.2" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="348.93" y="447.5" >cfunc..</text>
+</g>
+<g >
+<title>__schedule (6,449,537 us, 0.91%)</title><rect x="910.9" y="437" width="10.7" height="15.0" fill="rgb(114,114,225)" rx="2" ry="2" />
+<text  x="913.85" y="447.5" ></text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="565" width="30.2" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="595.49" y="575.5" >Py..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="453" width="26.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="463.5" >P..</text>
+</g>
+<g >
+<title>__d_lookup (15,558,322 us, 2.19%)</title><rect x="293.7" y="133" width="25.9" height="15.0" fill="rgb(116,116,224)" rx="2" ry="2" />
+<text  x="296.70" y="143.5" >_..</text>
+</g>
+<g >
+<title>_PyRun_SimpleFileObject (227,519,431 us, 32.09%)</title><rect x="657.7" y="805" width="378.7" height="15.0" fill="rgb(124,124,229)" rx="2" ry="2" />
+<text  x="660.71" y="815.5" >_PyRun_SimpleFileObject</text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (20,703,788 us, 2.92%)</title><rect x="149.3" y="805" width="34.5" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="152.32" y="815.5" >_d..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (15,774,847 us, 2.23%)</title><rect x="189.4" y="789" width="26.3" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="192.41" y="799.5" >P..</text>
+</g>
+<g >
+<title>_PyObject_MakeTpCall.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="453" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="463.5" >_..</text>
+</g>
+<g >
+<title>folio_batch_move_lru (15,858,868 us, 2.24%)</title><rect x="499.3" y="149" width="26.4" height="15.0" fill="rgb(134,134,226)" rx="2" ry="2" />
+<text  x="502.32" y="159.5" >f..</text>
+</g>
+<g >
+<title>llvm::MCContext::createELFSectionImpl (22,309,056 us, 3.15%)</title><rect x="10.0" y="773" width="37.1" height="15.0" fill="rgb(103,103,226)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" >llv..</text>
+</g>
+<g >
+<title>gc_collect_main (47,867,099 us, 6.75%)</title><rect x="1082.1" y="805" width="79.7" height="15.0" fill="rgb(124,124,236)" rx="2" ry="2" />
+<text  x="1085.11" y="815.5" >gc_collec..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (15,874,803 us, 2.24%)</title><rect x="1163.6" y="741" width="26.4" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="1166.58" y="751.5" >P..</text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (19,145,898 us, 2.70%)</title><rect x="47.8" y="805" width="31.9" height="15.0" fill="rgb(128,128,236)" rx="2" ry="2" />
+<text  x="50.82" y="815.5" >_d..</text>
+</g>
+<g >
+<title>bpf_object__probe_loading (15,785,510 us, 2.23%)</title><rect x="975.8" y="517" width="26.3" height="15.0" fill="rgb(115,115,232)" rx="2" ry="2" />
+<text  x="978.81" y="527.5" >b..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="821" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="831.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>do_syscall_64 (267,680 us, 0.04%)</title><rect x="47.4" y="709" width="0.4" height="15.0" fill="rgb(129,129,220)" rx="2" ry="2" />
+<text  x="50.37" y="719.5" ></text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (31,201,720 us, 4.40%)</title><rect x="189.4" y="885" width="51.9" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="192.41" y="895.5" >PyImp..</text>
+</g>
+<g >
+<title>_dl_relocate_object (23,623,939 us, 3.33%)</title><rect x="149.3" y="821" width="39.3" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="152.32" y="831.5" >_dl..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="645" width="104.6" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="244.34" y="655.5" >PyImport_Imp..</text>
+</g>
+<g >
+<title>_Py_HandlePending.localalias (15,426,873 us, 2.18%)</title><rect x="215.7" y="229" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="218.67" y="239.5" >_..</text>
+</g>
+<g >
+<title>dl_main (22,309,593 us, 3.15%)</title><rect x="47.1" y="837" width="37.2" height="15.0" fill="rgb(118,118,236)" rx="2" ry="2" />
+<text  x="50.13" y="847.5" >dl_..</text>
+</g>
+<g >
+<title>builtin_exec (31,363,771 us, 4.42%)</title><rect x="345.9" y="549" width="52.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="348.93" y="559.5" >built..</text>
+</g>
+<g >
+<title>error_entry (2,750,920 us, 0.39%)</title><rect x="79.7" y="805" width="4.6" height="15.0" fill="rgb(127,127,232)" rx="2" ry="2" />
+<text  x="82.68" y="815.5" ></text>
+</g>
+<g >
+<title>[libLLVM.so.21.1] (20,748,165 us, 2.93%)</title><rect x="84.5" y="773" width="34.5" height="15.0" fill="rgb(118,118,225)" rx="2" ry="2" />
+<text  x="87.50" y="783.5" >[l..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (62,836,908 us, 8.86%)</title><rect x="241.3" y="837" width="104.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="244.34" y="847.5" >cfunction_ve..</text>
+</g>
+<g >
+<title>statements_rule (15,731,546 us, 2.22%)</title><rect x="525.7" y="309" width="26.2" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="528.71" y="319.5" >s..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="677" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="687.5" >_..</text>
+</g>
+<g >
+<title>do_user_addr_fault (96,751 us, 0.01%)</title><rect x="149.2" y="773" width="0.1" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="152.15" y="783.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_deps (412,775 us, 0.06%)</title><rect x="47.1" y="821" width="0.7" height="15.0" fill="rgb(128,128,229)" rx="2" ry="2" />
+<text  x="50.13" y="831.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,731,546 us, 2.22%)</title><rect x="525.7" y="821" width="26.2" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="528.71" y="831.5" >o..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="693" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="703.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>type_ready (8,703,777 us, 1.23%)</title><rect x="578.0" y="725" width="14.5" height="15.0" fill="rgb(124,124,241)" rx="2" ry="2" />
+<text  x="581.00" y="735.5" ></text>
+</g>
+<g >
+<title>object_vacall (15,874,803 us, 2.24%)</title><rect x="1163.6" y="805" width="26.4" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="1166.58" y="815.5" >o..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (76,654,918 us, 10.81%)</title><rect x="398.1" y="549" width="127.6" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="401.13" y="559.5" >cfunction_vector..</text>
+</g>
+<g >
+<title>handle_weakrefs (13,852,519 us, 1.95%)</title><rect x="1115.4" y="789" width="23.1" height="15.0" fill="rgb(118,118,227)" rx="2" ry="2" />
+<text  x="1118.40" y="799.5" >h..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="757" width="127.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="401.13" y="767.5" >_PyEval_EvalFram..</text>
+</g>
+<g >
+<title>PyObject_CallMethodObjArgs.localalias (76,654,918 us, 10.81%)</title><rect x="398.1" y="725" width="127.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="735.5" >PyObject_CallMet..</text>
+</g>
+<g >
+<title>object_vacall (15,683,434 us, 2.21%)</title><rect x="423.7" y="325" width="26.1" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="426.71" y="335.5" >o..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (18,155,844 us, 2.56%)</title><rect x="592.5" y="677" width="30.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="595.49" y="687.5" >Py..</text>
+</g>
+<g >
+<title>builtin_exec (15,731,546 us, 2.22%)</title><rect x="525.7" y="517" width="26.2" height="15.0" fill="rgb(106,106,225)" rx="2" ry="2" />
+<text  x="528.71" y="527.5" >b..</text>
+</g>
+<g >
+<title>step_into (15,650,833 us, 2.21%)</title><rect x="267.6" y="149" width="26.1" height="15.0" fill="rgb(117,117,234)" rx="2" ry="2" />
+<text  x="270.65" y="159.5" >s..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,398,073 us, 2.17%)</title><rect x="826.0" y="405" width="25.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="828.97" y="415.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,731,546 us, 2.22%)</title><rect x="525.7" y="485" width="26.2" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="528.71" y="495.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="757" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="767.5" >_..</text>
+</g>
+<g >
+<title>bpf_prog_load (15,785,510 us, 2.23%)</title><rect x="975.8" y="341" width="26.3" height="15.0" fill="rgb(115,115,231)" rx="2" ry="2" />
+<text  x="978.81" y="351.5" >b..</text>
+</g>
+<g >
+<title>do_wp_page (2,920,151 us, 0.41%)</title><rect x="183.8" y="725" width="4.8" height="15.0" fill="rgb(129,129,237)" rx="2" ry="2" />
+<text  x="186.77" y="735.5" ></text>
+</g>
+<g >
+<title>sys_bpf_fd (15,785,510 us, 2.23%)</title><rect x="975.8" y="453" width="26.3" height="15.0" fill="rgb(123,123,232)" rx="2" ry="2" />
+<text  x="978.81" y="463.5" >s..</text>
+</g>
+<g >
+<title>_PyObject_Free.part.0.isra.0 (14,781,865 us, 2.08%)</title><rect x="776.9" y="229" width="24.6" height="15.0" fill="rgb(124,124,226)" rx="2" ry="2" />
+<text  x="779.88" y="239.5" >_..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (62,836,908 us, 8.86%)</title><rect x="241.3" y="661" width="104.6" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="671.5" >_PyEval_Eval..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (47,013,185 us, 6.63%)</title><rect x="241.3" y="405" width="78.3" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="244.34" y="415.5" >_PyEval_E..</text>
+</g>
+<g >
+<title>cfunction_vectorcall_FASTCALL_KEYWORDS (15,774,847 us, 2.23%)</title><rect x="189.4" y="325" width="26.3" height="15.0" fill="rgb(109,109,229)" rx="2" ry="2" />
+<text  x="192.41" y="335.5" >c..</text>
+</g>
+<g >
+<title>list_dealloc (15,684,884 us, 2.21%)</title><rect x="551.9" y="277" width="26.1" height="15.0" fill="rgb(109,109,226)" rx="2" ry="2" />
+<text  x="554.90" y="287.5" >l..</text>
+</g>
+<g >
+<title>r_object (15,823,723 us, 2.23%)</title><rect x="319.6" y="389" width="26.3" height="15.0" fill="rgb(119,119,229)" rx="2" ry="2" />
+<text  x="322.59" y="399.5" >r..</text>
+</g>
+<g >
+<title>do_user_addr_fault (2,920,151 us, 0.41%)</title><rect x="183.8" y="773" width="4.8" height="15.0" fill="rgb(129,129,215)" rx="2" ry="2" />
+<text  x="186.77" y="783.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (29,839,460 us, 4.21%)</title><rect x="476.0" y="197" width="49.7" height="15.0" fill="rgb(113,113,215)" rx="2" ry="2" />
+<text  x="479.05" y="207.5" >__han..</text>
+</g>
+<g >
+<title>PyObject_Vectorcall.localalias (21,029,491 us, 2.97%)</title><rect x="622.7" y="693" width="35.0" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="625.71" y="703.5" >Py..</text>
+</g>
+<g >
+<title>PyImport_ImportModuleLevelObject.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="373" width="52.2" height="15.0" fill="rgb(139,139,217)" rx="2" ry="2" />
+<text  x="348.93" y="383.5" >PyImp..</text>
+</g>
+<g >
+<title>_PyEval_EvalFrameDefault.localalias (15,684,884 us, 2.21%)</title><rect x="551.9" y="421" width="26.1" height="15.0" fill="rgb(124,124,217)" rx="2" ry="2" />
+<text  x="554.90" y="431.5" >_..</text>
+</g>
+<g >
+<title>PyEval_EvalCode.localalias (31,363,771 us, 4.42%)</title><rect x="345.9" y="789" width="52.2" height="15.0" fill="rgb(132,132,217)" rx="2" ry="2" />
+<text  x="348.93" y="799.5" >PyEva..</text>
+</g>
+<g >
+<title>object_vacall (15,426,873 us, 2.18%)</title><rect x="215.7" y="277" width="25.6" height="15.0" fill="rgb(116,116,218)" rx="2" ry="2" />
+<text  x="218.67" y="287.5" >o..</text>
+</g>
+<g >
+<title>PyObject_VectorcallMethod.localalias (15,368,260 us, 2.17%)</title><rect x="398.1" y="229" width="25.6" height="15.0" fill="rgb(134,134,217)" rx="2" ry="2" />
+<text  x="401.13" y="239.5" >P..</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (350,742,858 us, 49.47%)</title><rect x="578.0" y="869" width="583.8" height="15.0" fill="rgb(120,120,225)" rx="2" ry="2" />
+<text  x="581.00" y="879.5" >__libc_start_main@@GLIBC_2.34</text>
+</g>
+</g>
+</svg>
