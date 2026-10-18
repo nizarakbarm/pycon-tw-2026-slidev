@@ -117,3 +117,36 @@ FILES
    Scan from NF downward for the last <digits> token instead. Done that way the
    total is 1451.765043 s, matching the rank file to the digit.
 
+
+7) GETTID: WHERE IT COMES FROM, AND WHERE IT DOES NOT
+   results/straceT, count arm, all sizes. BCC gettid tracks N exactly:
+     N=100      60
+     N=1000    971
+     N=2000   1878
+     N=2M     1,907,735
+   Same ratio at every size, so it is real per-event work, NOT an artifact of
+   running under strace. Python-BPF calls gettid 3 times at N=2M.
+
+   Steady-state pattern in the BCC trace is strictly alternating:
+     poll(...) = 1 ([{fd=10, revents=POLLIN}])
+     gettid()
+     poll(...) = 1 ([{fd=9, revents=POLLIN}])
+     gettid()
+   One gettid immediately after each poll that returned data, so the call is in
+   the callback dispatch, not on a timer.
+
+   RULED OUT
+   * threading.get_ident(). Both programs contain the same per-event
+     `if threading.get_ident() != main_ident` check, so this was the first
+     suspect and it is wrong: 200,000 get_ident() calls in CPython 3.13 under
+     strace -c produce 2 gettid calls. CPython caches the thread identity.
+   * import or load. `import bcc` plus `BPF(text=...)` under strace -c gives 0.
+
+   STILL OPEN. Which call inside BCC's callback path issues it. Remaining
+   candidate: the per-event event object construction, b["events"].event(data),
+   BCC-specific ctypes work that runs once per event. Not proven. Do not assert
+   it; say the cause is in the callback path and not yet isolated.
+
+   NOTE ON THE UNPROFILED PASS. results/unprofiled cannot settle any of this.
+   Its .log files are program stdout, not a syscall trace, so they contain no
+   gettid line either present or absent. Only results/straceT carries syscalls.

@@ -431,8 +431,73 @@ layout: default
 
 `perf record`, 2M count arm. Share of sampled cycles with that frame anywhere on the stack.
 
+<span class="pbpf">Python-BPF binds with **pybind11**</span> · <span class="bcc">BCC binds with **ctypes**</span>
+
 <!--
 Data: results/perfrecord, 2M count arm, folded stacks summed by PMU cycles, frame matched anywhere on the stack. BCC carries the ctypes and libffi bridge on 84.0 percent of sampled cycles. Python-BPF carries it on zero percent, and its own binding pybind11 on 92.6 percent. clang is on 0.4 percent of BCC stacks, its runtime compile, and zero on Python-BPF. The same three names hold in the other arms: ctypes on 70.8 and 75.3 percent for BCC, pybind11 on 89.3 and 91.2 percent for Python-BPF. Percentages compare only within this pass. The measure is presence on the stack, not leaf time.
+
+ATTRIBUTION, measured 2026-10-18. The libffi frame does NOT mean libbcc links libffi. libbcc has no libffi dependency at all:
+
+  readelf -d /usr/lib64/libbcc.so.0.36.0 | grep NEEDED
+    libclang-cpp.so.21.1, libLLVM.so.21.1, libelf.so.1,
+    libbpf.so.1, libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6
+  grep -i ffi over the whole transitive closure -> empty.
+
+libffi enters along a SEPARATE branch of the same Python process:
+
+  python3
+    +- bcc/__init__.py:17   import ctypes as ct
+    |    +- _ctypes.cpython-313-x86_64-linux-gnu.so
+    |         +- libffi.so.8          <-- enters here
+    +- bcc/libbcc.py        ctypes.CDLL("libbcc.so.0")
+         +- libbcc.so.0 -> libbpf.so.1
+
+Evidence: ldd on the _ctypes .so shows libffi.so.8; ldd on libbcc.so shows no ffi. Two branches off CPython with no edge between them, which is why libffi is heavy in a process strace while absent from linkage.
+
+State it that way: the libffi cost is IMPORT cost, not eBPF cost. It is paid by `import ctypes` at bcc/__init__.py line 17, before any BPF program exists. Same class as the libclang-cpp and libLLVM mmap cost, which is the larger part of the same trace.
+
+Do NOT claim libffi is why the trace is large overall. libclang-cpp and libLLVM dominate it. The frame belongs on this slide as a cost, but it is not a libbcc dependency and it is not the bulk.
+
+-->
+
+---
+layout: default
+---
+
+# libffi is import cost, not eBPF cost
+
+`readelf -d /usr/lib64/libbcc.so.0.36.0 | grep NEEDED` — **no ffi anywhere**:
+
+```text
+libclang-cpp.so.21.1   libLLVM.so.21.1   libelf.so.1    libbpf.so.1
+libstdc++.so.6         libm.so.6         libgcc_s.so.1  libc.so.6
+```
+
+libffi enters on a **separate branch** of the same process:
+
+```text
+python3
+ +- bcc/__init__.py:17   import ctypes as ct
+ |   +- _ctypes...so  ->  libffi.so.8        IMPORT cost
+ +- bcc/libbcc.py        ctypes.CDLL("libbcc.so.0")
+     +- libbcc.so.0   ->  libbpf.so.1        eBPF cost
+```
+
+Two branches off CPython, no edge between them.
+
+<!--
+The 84.0 percent ctypes and libffi frame on the previous slide must not be misread as libbcc depending on libffi. It does not.
+
+Measured 2026-10-18. readelf -d on libbcc.so.0.36.0 lists eight NEEDED entries and not one is an ffi library: libclang-cpp.so.21.1, libLLVM.so.21.1, libelf.so.1, libbpf.so.1, libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6. A grep for ffi across the whole transitive closure comes back empty.
+
+libffi arrives by a different route, in the same process. CPython imports ctypes at bcc/__init__.py line 17 (the file reads `import ctypes as ct`), and the _ctypes extension module links libffi.so.8 directly. Separately, bcc/libbcc.py does ctypes.CDLL("libbcc.so.0"), which pulls libbcc and through it libbpf. So the process has two branches: one that brings libffi for ctypes itself, one that brings the eBPF loader stack. There is no edge between them, which is exactly why libffi is heavy in a process strace while absent from any library linkage.
+
+The consequences, and say them in this order.
+First, the libffi cost is IMPORT cost, not eBPF cost. It is paid by `import ctypes` before any BPF program exists. Same class of cost as the libclang-cpp and libLLVM mapping, which is the larger part of the same trace.
+Second, do NOT claim libffi is why the trace is large overall. libclang-cpp and libLLVM dominate it.
+Third, the frame still belongs on the previous slide as a real cost of the BCC path in Python. It is just not a libbcc dependency.
+
+Evidence commands, if asked: readelf -d /usr/lib64/libbcc.so.0.36.0 | grep NEEDED ; readelf -d on the _ctypes .so shows NEEDED libffi.so.8.
 -->
 
 ---
@@ -459,6 +524,23 @@ The wait is not eBPF work. Next slide traces the descriptors.
 
 <!--
 Lead with gettid, because it is the one real per-event cost. BCC calls gettid 1,907,735 times, close to once per event. Python-BPF calls it 3 times, at startup only.
+
+BUT BE CAREFUL WITH THE WORDING, and this is a correction made 2026-10-18. "BCC calls gettid" reads as a BCC framework property. It is not that, and it is not a strace artifact either. Say: BCC's per-event callback path costs a gettid per event, Python-BPF's does not. Where in that path the call comes from is not isolated.
+
+What is established, each with its evidence.
+
+1. It is per event, not an artifact of running under strace. gettid tracks N: 60 at N=100, 971 at N=1000, 1878 at N=2000, 1,907,735 at N=2M. A strace artifact would not scale 1:1 with the event count, and the ratio is the same at every size.
+
+2. The pattern in steady state is poll, then gettid, then poll, strictly alternating, one gettid immediately after each poll that returned data. So the call sits in the callback dispatch, not in a timer.
+
+3. It is NOT threading.get_ident(). Both programs contain the same per-event `if threading.get_ident() != main_ident` check, so blaming it was my first guess and it is wrong: 200,000 get_ident() calls in CPython 3.13 under strace -c produce 2 gettid calls. CPython caches the thread identity.
+
+4. It is NOT import or load. `import bcc` plus `BPF(text=...)` under strace -c gives 0 gettid.
+
+Still open: which call inside BCC's callback path issues it. The remaining candidate is the per-event event object construction, `b["events"].event(data)`, which is BCC-specific ctypes work and runs once per event. Not proven. Do not assert it on stage; if asked, say the cause is in the callback path and not yet isolated.
+
+One more thing worth knowing: the unprofiled pass cannot settle any of this. Its log is program stdout, not a syscall trace, so it contains no gettid line at all, present or absent. Only results/straceT carries syscalls.
+
 
 Do not say Python-BPF polls once. That came from the wrong row of the rank file.
 
@@ -605,17 +687,16 @@ layout: default
 # What makes up wall time?
 
 $$
-\text{wall} = pre + T + 0.5 + t_{init} + t_{trigger} + t_{poll}
+\text{wall} = pre + 0.5 + \underbrace{t_{init} + \boxed{t_{poll} \supset t_{trigger}}}_{\text{sequential, one process}}
 $$
 
-| term | value | who pays |
+| term | value | order |
 |---|---|---|
-| `pre` | 2 s / 1 s | bash, fixed |
-| `T` | 0.5 s | bash, fixed |
-| `0.5` | 0.5 s | bash, per retry |
-| `t_init` | 0.45 / 0.02 s | **the framework** |
-| `t_trigger` | ~1400 s | the program |
-| `t_poll` | 1763.6 / 1768.6 s | **the framework** |
+| `pre` | 2 s / 1 s | bash, before launch |
+| `0.5` | 0.5 s | bash, retry gate |
+| `t_init` | 0.45 / 0.02 s | program, then |
+| `t_poll` | 1763.6 / 1768.6 s | **contains** `t_trigger` |
+| `t_trigger` | ~1400 s | **inside** `t_poll` |
 
 Only `t_init` and `t_poll` differ. The trigger dominates.
 
@@ -630,11 +711,21 @@ Then the GATE: the runner does not fire on the fixed sleep alone. It polls the l
 
 t_init is the framework's own startup, 0.45 s for BCC against 0.02 s for Python-PBF. That is the one number on this slide the frameworks control at start.
 
-t_trigger is the trigger program, sudo -u TRIG_USER running the binary with N events. At 2M it is about 1400 seconds, and it is sequential, so it sets the pace for everything after it.
+t_trigger is the trigger program, sudo -u TRIG_USER running the binary with N events. At 2M it is about 1400 seconds.
 
-T is the bash drain after the trigger, 0.5 s, fixed.
+Do not ADD t_trigger to t_poll. They overlap, and the code says so plainly. The arm function backgrounds the program and then runs the trigger in the foreground:
 
-t_poll is the program's poll loop from the log, 1763.6 s for BCC and 1768.6 s for Python-PBF. Note it is larger than t_trigger because the poll starts before the trigger and ends after the drain.
+  "$py" "$prog" > "$log" 2>&1 &     the program starts, its poll loop begins
+  sleep "$pre"
+  sudo -u "$TRIG_USER" "$TRIG_BIN" "$N"    the trigger runs on the same clock
+  sleep "$T"                                drain, poll still running
+  kill -INT "$pid"                          poll ends here
+
+So the trigger runs WHILE the poll loop is already waiting, and every event the trigger causes is what poll is draining. The poll loop contains the trigger.
+
+The numbers agree. BCC poll loop wall is 1763.010 s and Total wall is 1763.592 s, so the poll loop is 99.97 percent of the whole run; init and setup take 0.581 s between them. If t_trigger were a separate term at about 1400 s the sum would be roughly 3170 s, nearly double the 1763.6 s actually observed. That is the arithmetic proof that the terms are nested, not stacked.
+
+What this means for the argument. wall is set by the trigger, and the poll loop is the program sitting behind it, so a wall difference between frameworks is a difference in how long each one waits, not in how much work it does. That is exactly why the deck quotes CPU.
 
 Then teardown: SIGINT, then the runner waits in 0.5 s steps up to 20 s for the child to exit.
 
